@@ -46,14 +46,19 @@ image = (
         "pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime",
         add_python="3.11",
     )
-    .apt_install("ffmpeg", "git")
+    .run_commands(
+        "export DEBIAN_FRONTEND=noninteractive && "
+        "apt-get update && "
+        "apt-get install -y --no-install-recommends ffmpeg git tzdata && "
+        "rm -rf /var/lib/apt/lists/*"
+    )
     .pip_install_from_requirements(str(_REQUIREMENTS))
     .pip_install("git+https://github.com/m-bain/whisperX.git")
     # Bake the worker + shared packages into the image. Modal needs the
     # absolute repo paths so the image gets fresh copies on every deploy.
+    .workdir("/app")
     .add_local_dir(str(_REPO_ROOT / "worker"), remote_path="/app/worker")
     .add_local_dir(str(_REPO_ROOT / "shared"), remote_path="/app/shared")
-    .workdir("/app")
 )
 
 app = modal.App("justme-worker", image=image)
@@ -65,8 +70,8 @@ app = modal.App("justme-worker", image=image)
     cpu=4.0,
     memory=16384,          # 16 GB RAM
     timeout=7800,          # 2h10m — matches worker/celery_app.py hard limit
-    keep_warm=1,           # always 1 instance up to drain the queue
-    allow_concurrent_inputs=1,  # one Modal invocation; celery handles in-process concurrency
+    min_containers=1,           # always 1 instance up to drain the queue
+    # @modal.concurrent=1,  # one Modal invocation; celery handles in-process concurrency
 )
 def run_worker() -> None:
     """
