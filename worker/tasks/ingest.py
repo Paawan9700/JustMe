@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,12 @@ from shared.constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Cached path to the cookies file written from the YOUTUBE_COOKIES env var.
+# Lazy-initialised the first time _maybe_add_cookies() runs, then reused for
+# every subsequent yt-dlp call in this worker process. We can't put cookies
+# in job_dir because _extract_info() runs *before* job_dir is even created.
+_COOKIES_FILE_PATH: str | None = None
 
 
 class IngestError(Exception):
@@ -186,6 +193,50 @@ def download_video(job_id: str, youtube_url: str, job_dir: Path) -> Path:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _maybe_add_cookies(ydl_opts: dict[str, Any]) -> None:
+    """
+    Inject YouTube cookies into yt-dlp options if `YOUTUBE_COOKIES` is set.
+
+    YouTube blocks downloads from cloud/datacenter IPs with HTTP 403
+    ("Sign in to confirm you're not a bot"). The fix is to authenticate
+    yt-dlp with a Netscape-format cookies.txt exported from a logged-in
+    browser. On Modal we ship that file's contents via the
+    `YOUTUBE_COOKIES` env var (part of the `justme-secrets` Modal secret).
+
+    The cookies content is written once per process to a temp file and
+    that path is reused for every subsequent yt-dlp call.
+
+    No-op if `YOUTUBE_COOKIES` is unset or empty — tests in the Emergent
+    container can still run without cookies (they'll hit the same 403,
+    but that's expected here).
+    """
+    global _COOKIES_FILE_PATH  # noqa: PLW0603
+
+    cookies_blob = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if not cookies_blob:
+        return
+
+    if _COOKIES_FILE_PATH is None:
+        # Write to a NamedTemporaryFile with delete=False so the path
+        # survives until the process exits. yt-dlp opens it read-only.
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".txt",
+            prefix="yt_cookies_",
+            delete=False,
+        )
+        try:
+            tmp.write(cookies_blob)
+            if not cookies_blob.endswith("\n"):
+                tmp.write("\n")
+        finally:
+            tmp.close()
+        _COOKIES_FILE_PATH = tmp.name
+        logger.info("ingest: wrote YouTube cookies to %s", _COOKIES_FILE_PATH)
+
+    ydl_opts["cookiefile"] = _COOKIES_FILE_PATH
+
+
 def _extract_info(youtube_url: str) -> dict[str, Any]:
     """Metadata-only probe (no download)."""
     ydl_opts = {
@@ -194,6 +245,7 @@ def _extract_info(youtube_url: str) -> dict[str, Any]:
         "noplaylist": True,
         "skip_download": True,
     }
+    _maybe_add_cookies(ydl_opts)
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(youtube_url, download=False)
