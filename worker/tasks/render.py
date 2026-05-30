@@ -209,9 +209,23 @@ def run_render(job_id: str, job_dir: Path) -> None:
     )
 
     total_dur = sum(s["end"] - s["start"] for s in cut_list)
+    video_duration = (db.jobs.find_one(
+        {"job_id": job_id}, {"duration_sec": 1, "_id": 0},
+    ) or {}).get("duration_sec") or 0
+    try:
+        final_size_mb = final_path.stat().st_size / 1_000_000.0
+    except OSError:
+        final_size_mb = 0.0
+
     logger.info(
-        "render[%s] done: %d segments, %.1fs final duration -> %s",
-        job_id, len(cut_list), total_dur, final_key,
+        "render[%s] DONE: extracted %d segments totaling %.1f minutes "
+        "from %.1f-hour video (final.mp4 = %.1f MB) -> %s",
+        job_id,
+        len(cut_list),
+        total_dur / 60.0,
+        (video_duration or 0) / 3600.0,
+        final_size_mb,
+        final_key,
     )
 
     # 9. Finish

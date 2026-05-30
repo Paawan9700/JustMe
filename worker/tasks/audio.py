@@ -89,5 +89,9 @@ def extract_audio(job_id: str, local_video_path: Path, job_dir: Path) -> Path:
     )
 
     progress(job_id, percent=100.0, message="Audio extracted")
-    logger.info("audio[%s] extracted -> %s", job_id, r2_key)
+    try:
+        size_mb = audio_path.stat().st_size / 1_000_000.0
+    except OSError:
+        size_mb = 0.0
+    logger.info("audio[%s] extracted (%.1f MB) -> %s", job_id, size_mb, r2_key)
     return audio_path

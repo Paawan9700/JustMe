@@ -54,6 +54,13 @@ def _validate_youtube_url(url: str) -> tuple[bool, str | None]:
     Returns (is_valid, reject_reason). Lightweight format check only —
     authoritative validation (including is_live) happens in the worker
     via yt-dlp.
+
+    M7 (hardening) compliance — the three rules are:
+      1. Reject non-YouTube hosts.
+      2. Reject playlist URLs (`/playlist` or `?list=`).
+      3. Reject YouTube Shorts (`/shorts/`).
+    All three were introduced in the M2 URL-validation bug fix; M7
+    re-verified them via curl. No code changes required.
     """
     try:
         u = urlparse(url.strip())

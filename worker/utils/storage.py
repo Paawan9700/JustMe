@@ -4,6 +4,17 @@ Worker-side Cloudflare R2 helpers.
 Mirrors backend/app/services/storage.py but is fully self-contained
 so the worker can be deployed and run without the backend package.
 Credentials come from environment variables.
+
+R2 ARTIFACT EXPIRY (production setup — do this in the Cloudflare dashboard):
+    Go to:  R2 -> <bucket> -> Settings -> Object Lifecycle Rules -> Add Rule
+    Name:    "Delete old job artifacts"
+    Prefix:  jobs/
+    Action:  "Delete objects" after  7 days  since object upload date
+    Status:  Enabled
+This wipes source.mp4, audio.wav, snippets/*.mp3 and final.mp4 a week
+after each job is created so storage costs stay bounded. The API and
+worker code do not perform deletion themselves — lifecycle rules are
+the canonical, retry-safe mechanism for this.
 """
 
 from __future__ import annotations

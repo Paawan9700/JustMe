@@ -581,6 +581,84 @@ diarization fallback when whisperx isn't installed):
   ingest (M3) -> audio (M3) -> diarize (M4) -> snippets (M5)
   -> select-speaker (API) -> render (M6) -> DONE.
 
+---
+
+### M7: Hardening — ✅ DONE (Jan 2026)
+Implemented:
+
+1. **Idempotent stage skipping** (`worker/tasks/dummy.py`):
+   - 4 predicates — `_ingest_already_done`, `_audio_already_done`,
+     `_diarize_already_done`, `_snippets_already_done` — each consults
+     the job doc / segments collection / R2 (`file_exists`) to decide
+     whether to skip. A worker crash + Celery requeue now resumes from
+     the last completed stage instead of re-running the whole pipeline.
+   - When audio is skipped but ingest also ran in a prior crashed run,
+     the orchestrator pulls `source.mp4` from R2 only if a later stage
+     needs it locally.
+
+2. **Celery configuration**:
+   - `task_soft_time_limit=7200` (2 h) → `SoftTimeLimitExceeded` raised
+     inside the task; caught in `process_video` + `render_video` and
+     translated to `state.fail(job_id, "TIMEOUT", "Processing timed
+     out. Please try again.")`.
+   - `task_time_limit=7800` (hard kill at 2 h 10 m).
+   - `process_video`: `max_retries=2, default_retry_delay=60`.
+   - `render_video`: `max_retries=1, default_retry_delay=30`.
+
+3. **Input validation** (`backend/app/api/jobs.py`):
+   - Already implemented in the M2 bug fix. Re-verified via curl:
+     `/playlist?list=`, `?list=` on `/watch`, `/shorts/`, non-YouTube
+     hosts all return 400 with their dedicated messages; `/watch?v=`,
+     `youtu.be/`, `/live/` (completed past streams), `/embed/` all
+     return 201. Compliance comment added to
+     `_validate_youtube_url`'s docstring.
+
+4. **Structured logging** (per-stage, throughout `worker/`):
+   - `ingest`: `"ingest[id] downloaded TITLE (Ds duration, M MB local) -> KEY"`.
+   - `audio`: `"audio[id] extracted (M MB) -> KEY"`.
+   - `diarize`: `"diarize[id] complete: N speakers, M segments, Xs total speaking"`.
+   - `render`: `"render[id] DONE: extracted N segments totaling X minutes
+     from Y-hour video (final.mp4 = M MB) -> KEY"`.
+   - `process_video` summary: `"process_video[id] DONE in Ts | title= |
+     duration= | speakers= | segments="` plus per-stage `t0 = perf_counter()`
+     elapsed timing logs.
+
+5. **R2 lifecycle TODO** — Top-of-file block in `worker/utils/storage.py`
+   documenting the **Cloudflare R2 dashboard** lifecycle rule: prefix
+   `jobs/`, delete objects 7 days after upload. The code itself does
+   no deletion; lifecycle rules are the canonical retry-safe mechanism.
+
+6. **Graceful error messages** (`frontend/src/pages/JobStatus.jsx`):
+   - New `ERROR_CODE_MESSAGES` map covers `PRIVATE`, `UNAVAILABLE`,
+     `MEMBERS_ONLY`, `AGE_RESTRICTED`, `COPYRIGHT`, `REGION_BLOCKED`,
+     `LIVE_STREAM`, `DIARIZE_FAILED`, `TRANSCRIBE_FAILED`, `TIMEOUT`.
+   - `friendlyError(job)` prefers a mapped code → falls back to the
+     API's specific `error.message` (so dynamic strings like the
+     `TOO_LONG` "N hours" still surface) → finally a generic message.
+   - `<Failed>` component updated to use `friendlyError(job)`.
+
+Verified:
+- **B. Idempotent resume**: synthetic job seeded as
+  `status=EXTRACTING_AUDIO` with audio.wav already in R2. After
+  `process_video.run(job_id)`: ingest + audio were NOT called (spied),
+  diarize + snippets ran legitimately, status reached
+  `AWAITING_SELECTION`.
+- **C. Soft-timeout**: `SoftTimeLimitExceeded` injected into ingest →
+  job ends `status=FAILED`, `error.code=TIMEOUT`, `error.message=
+  "Processing timed out. Please try again."`. Same path verified for
+  `render_video`.
+- **D. Frontend friendly message**: navigated to a FAILED job with
+  `error.code=DIARIZE_FAILED` → page rendered "Could not detect any
+  speakers in this video. Try a video with clearer audio." (screenshot
+  confirms; raw worker message is NOT shown).
+- **E. Celery settings asserted**: `task_soft_time_limit=7200`,
+  `task_time_limit=7800`, `process_video.max_retries=2 / delay=60`,
+  `render_video.max_retries=1 / delay=30`.
+- All worker lint clean; ESLint clean on frontend.
+
+Worker restarted; `process_video` + `render_video` re-registered with
+the new retry knobs + time limits.
+
 Deferred (waiting on user to specify the milestone before building):
 
 ## Next Action Items

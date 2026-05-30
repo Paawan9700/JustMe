@@ -170,7 +170,14 @@ def download_video(job_id: str, youtube_url: str, job_dir: Path) -> Path:
     )
 
     progress(job_id, percent=100.0, message="Download complete")
-    logger.info("ingest[%s] downloaded %s -> %s", job_id, local_path, r2_key)
+    try:
+        size_mb = local_path.stat().st_size / 1_000_000.0
+    except OSError:
+        size_mb = 0.0
+    logger.info(
+        "ingest[%s] downloaded %r (%.1fs duration, %.1f MB) -> %s",
+        job_id, title, duration_sec, size_mb, r2_key,
+    )
     return local_path
 
 

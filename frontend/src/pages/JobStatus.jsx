@@ -283,9 +283,43 @@ function buildDoneStats(job) {
 /* --------------------------------------------------------------------- */
 /* State E — Failed                                                     */
 /* --------------------------------------------------------------------- */
+
+// Map server error codes to friendly user-facing messages (M7).
+// Unknown codes fall through to job.error.message (which is itself a
+// human-readable string from the worker), and finally to a generic
+// fallback. Keep this map small and stable — every entry is an
+// intentional override of the API's raw text.
+const ERROR_CODE_MESSAGES = {
+  PRIVATE: "This video is private or has been removed.",
+  UNAVAILABLE: "This video is private or has been removed.",
+  MEMBERS_ONLY: "This video is for channel members only.",
+  AGE_RESTRICTED: "This video is age-restricted.",
+  COPYRIGHT: "This video is blocked for copyright reasons.",
+  REGION_BLOCKED: "This video isn\u2019t available in our region.",
+  LIVE_STREAM:
+    "This video is currently live. Please wait until the stream ends and try again.",
+  DIARIZE_FAILED:
+    "Could not detect any speakers in this video. Try a video with clearer audio.",
+  TRANSCRIBE_FAILED:
+    "Could not transcribe the audio. Try a video with clearer speech.",
+  TIMEOUT: "Processing timed out. Please try again.",
+};
+
+const GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again.";
+
+function friendlyError(job) {
+  const code = job.error?.code;
+  if (code && ERROR_CODE_MESSAGES[code]) {
+    return ERROR_CODE_MESSAGES[code];
+  }
+  // Unknown codes: prefer the API's specific message (e.g. TOO_LONG
+  // includes the actual hour limit dynamically).
+  return job.error?.message || job.progress?.message || GENERIC_ERROR_MESSAGE;
+}
+
 function Failed({ job }) {
   const navigate = useNavigate();
-  const msg = job.error?.message || job.progress?.message || "Something went wrong.";
+  const msg = friendlyError(job);
   return (
     <div className="failed-block" data-testid="state-failed">
       <h2 className="failed-title" data-testid="failed-title">Job failed</h2>

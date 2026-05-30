@@ -199,6 +199,13 @@ def run_diarization(
             f"{'s' if len(speakers_doc) != 1 else ''}"
         ),
     )
+    total_speaking = sum(
+        (s["end"] - s["start"]) for s in processed
+    ) if processed else 0.0
+    logger.info(
+        "diarize[%s] complete: %d speakers, %d segments, %.1fs total speaking",
+        job_id, len(speakers_doc), len(processed), total_speaking,
+    )
 
     # Local audio is no longer needed (R2 still has it for M5 snippet gen)
     try:

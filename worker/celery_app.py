@@ -63,6 +63,12 @@ celery_app.conf.update(
     # doesn't lose the message.
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    # ---- M7: time limits -------------------------------------------------
+    # Soft limit raises celery.exceptions.SoftTimeLimitExceeded inside the
+    # task so it can mark the job FAILED gracefully. Hard limit SIGKILLs the
+    # worker process if the task ignores the soft signal.
+    task_soft_time_limit=7200,   # 2h soft limit
+    task_time_limit=7800,        # 2h10m hard kill
 )
 
 
