@@ -1,11 +1,16 @@
 # JustMe worker — Python deps for the production GPU container.
 #
-# Not used by Emergent (the worker deploys on the user's own GPU box).
-# The worker also requires `ffmpeg` and `ffprobe` from the OS package
-# manager (apt-get install ffmpeg on Debian/Ubuntu, etc.) — see
-# Dockerfile.
+# This file is NOT used by Emergent (the worker deploys on the user's
+# own GPU box). The worker also requires `ffmpeg` and `ffprobe` from the
+# OS package manager — see Dockerfile.
 #
 # Versions are loose minimums; pin tighter when you cut a release.
+#
+# IMPORTANT:
+# - `torch` is provided by the pytorch CUDA base image. Do NOT pin it
+#   here — that would risk a mismatched CUDA version.
+# - `whisperx` is installed in the Dockerfile from its git head because
+#   PyPI lags upstream. Don't add it here either.
 
 yt-dlp>=2026.3.17
 boto3>=1.43.0
@@ -13,3 +18,4 @@ celery[redis]>=5.4.0
 pymongo>=4.5.0
 ffmpeg-python>=0.2.0
 python-dotenv>=1.0.0
+pyannote.audio>=3.0

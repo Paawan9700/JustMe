@@ -357,6 +357,95 @@ app name; can be changed if user prefers).
 Worker process restarted with the refactored code; `process_video` +
 `render_video` re-registered with Celery.
 
+---
+
+### M4: Real Speaker Diarization (WhisperX + pyannote) — ✅ DONE (Jan 2026)
+Implemented:
+- **`worker/tasks/diarize.py`** — `run_diarization(job_id, audio_r2_key,
+  job_dir, duration_sec)`:
+    1. Transitions job to DIARIZING (msg: "Loading AI models (first run
+       may take a few minutes)...").
+    2. Lazy-imports `whisperx` + `torch` inside the function so the
+       module is safely importable on CPU-only machines. ImportError ->
+       `DiarizationError("MISSING_DEPS", ...)`.
+    3. Reads `HF_TOKEN`; missing -> `DiarizationError("MISSING_HF_TOKEN",
+       ...)` with setup instructions.
+    4. Auto-picks `cuda`/`float16` if available, else `cpu`/`int8`.
+    5. Downloads `audio.wav` from R2 if not already on disk.
+    6. Three-stage WhisperX pipeline (transcribe / align / diarize) with
+       `large-v2`, `batch_size=16`, progress updates at 10/35/55/70%.
+       Each stage frees model + `torch.cuda.empty_cache()` to avoid
+       VRAM spikes between stages.
+    7. HF 401/gated errors are caught and remapped to
+       `DiarizationError("HF_ACCESS_DENIED", ...)` with the exact
+       pyannote license-acceptance URL the user must visit.
+    8. Extracts raw `(speaker, start, end)` triples; calls
+       `post_process_segments`.
+    9. Idempotent persist: `db.segments.delete_many({"job_id"...})`
+       then `insert_many`.
+    10. Aggregates `job.speakers` (label, total_speaking_sec rounded to
+        2dp, segment_count, snippet_key=null) sorted by label.
+    11. Final progress 100%, message "Found N speaker(s)". Local
+        `audio.wav` removed (R2 retains it for M5).
+
+- **`post_process_segments(raw, video_duration_sec)`** — pure function,
+  fully unit-tested (10 cases):
+    a) **MERGE** same-speaker segments with gap < `MERGE_GAP_SEC=1.5s`.
+    b) **DROP** segments shorter than `MIN_SEGMENT_SEC=0.5s` (applied
+       AFTER merge, so tiny adjacent fragments merge then survive).
+    c) **PAD** ±`PAD_SEC=0.25s`, clamped to `[0, video_duration_sec]`.
+    d) **SORT** by start time.
+   Different speakers are never merged with each other; tunables are
+   module-level constants for testability + production tweaking.
+
+- **`worker/tasks/dummy.py`** refactored — `process_video` now chains:
+  ingest → audio → diarize (with `_diarize_or_fallback`) → mock snippet
+  stage → AWAITING_SELECTION. `DiarizationError` joins ingest/audio
+  errors in the orchestrator's catch list: failures of any code other
+  than `MISSING_DEPS` (e.g. `MISSING_HF_TOKEN`, `HF_ACCESS_DENIED`,
+  `TRANSCRIBE_FAILED`, `ALIGN_FAILED`, `DIARIZE_FAILED`,
+  `AUDIO_DOWNLOAD_FAILED`) surface as job.status=FAILED with the
+  user-facing message visible in the frontend's State E.
+
+- **`_diarize_or_fallback`** — tries the real pipeline first. ONLY on
+  `MISSING_DEPS` it falls back to the existing 2-speaker mock so the
+  Emergent CPU-only container can still exercise the M2 frontend flow.
+  Loud `logger.warning` makes accidental production fallback obvious.
+
+- **`worker/requirements.txt`** — added `pyannote.audio>=3.0`. Made
+  explicit that `torch` MUST NOT be pinned (comes from the pytorch CUDA
+  base image) and `whisperx` is installed from git in the Dockerfile.
+
+- **`worker/Dockerfile`** — real Dockerfile in place:
+    * Base: `pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime`
+    * apt: ffmpeg + git
+    * pip: `worker/requirements.txt` (cached layer) + whisperx from
+      `git+https://github.com/m-bain/whisperX.git`.
+    * Copies BOTH `worker/` and `shared/` into the image (build context
+      = project root). CMD: `celery -A worker.celery_app worker
+      --loglevel=info --concurrency=1` (single-GPU OOM guard).
+    * Header documents the `docker build -f worker/Dockerfile -t
+      justme-worker .` invocation and the env vars the container
+      needs.
+
+Verified (Emergent CPU container):
+- 10/10 `post_process_segments` unit tests pass (empty input, merge
+  same-speaker, no merge across speakers, drop shorts, merge-before-drop,
+  pad clamping, sort, realistic multi-speaker scenario, speakers
+  aggregation).
+- `run_diarization()` raises `DiarizationError("MISSING_DEPS", ...)` on
+  this CPU box. DIARIZING transition fires before the import fails.
+- Orchestrator's `_diarize_or_fallback` catches MISSING_DEPS, populates
+  2 fake speakers, pipeline reaches AWAITING_SELECTION via the mock
+  snippets stage.
+- State machine still rejects illegal transitions (regression check).
+- `worker.tasks.diarize` module is safely importable without whisperx.
+- Worker restarted; Celery sees `process_video` + `render_video`.
+
+Awaiting from user (when ready to deploy real M4):
+- `HF_TOKEN` (HuggingFace token with the
+  `pyannote/speaker-diarization-3.1` license accepted).
+
 Deferred (waiting on user to specify the milestone before building):
 
 ## Next Action Items

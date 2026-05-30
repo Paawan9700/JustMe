@@ -1,26 +1,22 @@
 """
-Pipeline orchestrator + still-mocked diarization/snippet stages.
+Pipeline orchestrator + still-mocked snippet/render stages.
 
-What's real (since M3):
-  - DOWNLOADING        -> worker.tasks.ingest.download_video
-  - EXTRACTING_AUDIO   -> worker.tasks.audio.extract_audio
+What's real (since M3 / M4):
+  - DOWNLOADING      -> worker.tasks.ingest.download_video
+  - EXTRACTING_AUDIO -> worker.tasks.audio.extract_audio
+  - DIARIZING        -> worker.tasks.diarize.run_diarization
+                        (WhisperX + pyannote, GPU only — dev box falls
+                        back to a mocked 2-speaker fixture so the
+                        Emergent-hosted M2 UI can still be exercised)
 
-What's still mocked (will land in M5 + M6):
-  - DIARIZING + GENERATING_SNIPPETS + AWAITING_SELECTION
-    (fake speakers SPEAKER_00 / SPEAKER_01 with snippet_key=null)
-  - RENDERING -> DONE (render_video task; final_video_key stays null)
+What's still mocked (will land in M5 / M6):
+  - GENERATING_SNIPPETS  -> brief transition with no real snippet upload
+  - AWAITING_SELECTION   -> just transitions in (speakers are real from M4)
+  - RENDERING -> DONE    -> render_video task; final_video_key stays null
 
-Real livestream detection happens in M3 via yt-dlp metadata.
-We check the 'is_live' field from yt-dlp's info extraction:
-  - is_live == True  -> stream is happening RIGHT NOW   -> reject
-  - is_live == False OR was_live == True -> completed recording -> allow
-Do NOT detect livestreams from URL patterns - they are unreliable
-(e.g. completed past livestreams keep the /live/<id> URL form).
-
-When the worker rejects an active livestream it uses the constant
-LIVE_STREAM_REJECT_MESSAGE from shared/constants.py:
-    "This video is currently live. Please wait until the stream ends
-     and try again."
+Real livestream detection happens in ingest via yt-dlp's `is_live` field;
+the URL-pattern check that used to live here was removed in the M2 bug
+fix. See worker/tasks/ingest.py.
 
 Tasks registered with Celery:
   - process_video(job_id)
@@ -42,8 +38,9 @@ from worker.celery_app import celery_app
 from worker.db import get_db
 from worker.state import fail, progress, transition
 from worker.tasks import audio as audio_task
+from worker.tasks import diarize as diarize_task
 from worker.tasks import ingest as ingest_task
-from shared.constants import JobStatus
+from shared.constants import JobStatus, r2_key_audio
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +48,7 @@ JOB_TMP_ROOT = Path("/tmp/justme")
 
 
 # ---------------------------------------------------------------------------
-# Task 1: process_video — ingest -> audio -> (dummy) diarize -> awaiting
+# Task 1: process_video — ingest -> audio -> diarize -> awaiting_selection
 # ---------------------------------------------------------------------------
 
 @celery_app.task(name="process_video", bind=True)
@@ -59,7 +56,10 @@ def process_video(self, job_id: str) -> dict[str, Any]:  # noqa: ARG001
     logger.info("process_video[%s] start", job_id)
 
     db = get_db()
-    job = db.jobs.find_one({"job_id": job_id}, {"youtube_url": 1, "_id": 0})
+    job = db.jobs.find_one(
+        {"job_id": job_id},
+        {"youtube_url": 1, "duration_sec": 1, "_id": 0},
+    )
     if not job:
         logger.warning("process_video[%s] job not found", job_id)
         return {"ok": False, "reason": "job not found"}
@@ -76,12 +76,15 @@ def process_video(self, job_id: str) -> dict[str, Any]:  # noqa: ARG001
         # ---- EXTRACTING_AUDIO (real) ----------------------------------
         audio_task.extract_audio(job_id, local_video, job_dir)
 
-        # Both artifacts are in R2 now; local files no longer needed
-        # for the dummy diarization that follows. We'll still wipe the
-        # whole job_dir in `finally`.
+        # ---- DIARIZING (real, with dev fallback only on MISSING_DEPS) -
+        duration_sec = (
+            db.jobs.find_one({"job_id": job_id}, {"duration_sec": 1, "_id": 0})
+            or {}
+        ).get("duration_sec") or 0
+        _diarize_or_fallback(job_id, job_dir, duration_sec)
 
-        # ---- DIARIZING (still mocked — replaced in M5) ----------------
-        _run_dummy_diarization(job_id)
+        # ---- GENERATING_SNIPPETS + AWAITING_SELECTION (still mocked) --
+        _dummy_snippets_stage(job_id)
 
         logger.info("process_video[%s] done -> AWAITING_SELECTION", job_id)
         return {"ok": True, "job_id": job_id}
@@ -96,6 +99,11 @@ def process_video(self, job_id: str) -> dict[str, Any]:  # noqa: ARG001
         fail(job_id, exc.code, exc.message)
         return {"ok": False, "code": exc.code, "reason": exc.message}
 
+    except diarize_task.DiarizationError as exc:
+        logger.warning("process_video[%s] diarize failed: %s", job_id, exc.message)
+        fail(job_id, exc.code, exc.message)
+        return {"ok": False, "code": exc.code, "reason": exc.message}
+
     except Exception as exc:  # noqa: BLE001
         logger.exception("process_video[%s] unexpected error", job_id)
         fail(job_id, "WORKER_ERROR", f"Unexpected worker error: {exc!s}"[:300])
@@ -106,39 +114,76 @@ def process_video(self, job_id: str) -> dict[str, Any]:  # noqa: ARG001
         shutil.rmtree(job_dir, ignore_errors=True)
 
 
-def _run_dummy_diarization(job_id: str) -> None:
-    """Placeholder for the M5 diarization. Same behaviour as M1 dummy."""
-    transition(
-        job_id, JobStatus.DIARIZING.value,
-        stage="diarizing", percent=0.0,
-        message="Diarization starting",
-    )
+# ---------------------------------------------------------------------------
+# Diarization wrapper: real first, dev fallback only on MISSING_DEPS
+# ---------------------------------------------------------------------------
+
+def _diarize_or_fallback(job_id: str, job_dir: Path, duration_sec: float) -> None:
+    """
+    Try the real WhisperX + pyannote pipeline first. If — and only if —
+    the deps aren't installed (i.e. we're running in the Emergent dev
+    container), fall back to a mocked 2-speaker fixture so the M2 UI
+    flow can still be exercised end-to-end during development.
+
+    Any other diarization failure (missing HF_TOKEN, model crash, R2
+    download error) is re-raised and surfaces as job.status = FAILED
+    with the appropriate user-facing message.
+    """
+    audio_key = r2_key_audio(job_id)
+    try:
+        diarize_task.run_diarization(job_id, audio_key, job_dir, duration_sec)
+        return
+    except diarize_task.DiarizationError as exc:
+        if exc.code != "MISSING_DEPS":
+            raise
+        logger.warning(
+            "diarize[%s] WhisperX not installed — using mocked speakers "
+            "(this branch should NEVER run in production)",
+            job_id,
+        )
+        _mock_diarize_for_dev(job_id)
+
+
+def _mock_diarize_for_dev(job_id: str) -> None:
+    """
+    Stand-in for real diarization when whisperx isn't installed.
+    Used only by the Emergent CPU-only dev container so the rest of
+    the pipeline (snippet/render mocks, frontend states) stays
+    exercisable. Status is already DIARIZING when we get here.
+    """
+    progress(job_id, percent=50.0, message="Diarizing (dev mode — no GPU)")
     time.sleep(2)
-    progress(job_id, percent=50.0, message="Diarizing speakers...")
-    time.sleep(2)
-    progress(job_id, percent=100.0, message="Diarization complete")
+    progress(job_id, percent=100.0, message="Diarization complete (mocked)")
 
     fake_speakers = [
-        {
-            "label": "SPEAKER_00",
-            "total_speaking_sec": 180.0,
-            "segment_count": 5,
-            "snippet_key": None,
-        },
-        {
-            "label": "SPEAKER_01",
-            "total_speaking_sec": 120.0,
-            "segment_count": 3,
-            "snippet_key": None,
-        },
+        {"label": "SPEAKER_00", "total_speaking_sec": 180.0,
+         "segment_count": 5, "snippet_key": None},
+        {"label": "SPEAKER_01", "total_speaking_sec": 120.0,
+         "segment_count": 3, "snippet_key": None},
     ]
+    db = get_db()
+    db.jobs.update_one(
+        {"job_id": job_id},
+        {"$set": {"speakers": fake_speakers}},
+    )
+
+
+def _dummy_snippets_stage(job_id: str) -> None:
+    """
+    Placeholder for M5 (snippet generation).
+
+    Real M5 will: pick a representative segment per speaker, cut it out
+    with ffmpeg, upload to R2, set speakers[].snippet_key for each. For
+    now we just walk the state machine through to AWAITING_SELECTION so
+    the UI flips. job.speakers is already populated by the diarization
+    step.
+    """
     transition(
         job_id, JobStatus.GENERATING_SNIPPETS.value,
         stage="generating_snippets", percent=0.0,
-        message="Generating identification snippets",
-        extra_set={"speakers": fake_speakers},
+        message="Generating identification snippets...",
     )
-    time.sleep(2)
+    time.sleep(1)
     transition(
         job_id, JobStatus.AWAITING_SELECTION.value,
         stage="awaiting_selection", percent=100.0,
