@@ -55,7 +55,7 @@ worker fails at model-load with HTTP 403.
    **Type: read** → copy it (starts with `hf_`).
 5. Quick check from any shell with curl installed:
    ```bash
-   HF=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+     HF=hf_REPLACE_WITH_YOUR_READ_TOKEN
    for m in pyannote/speaker-diarization-3.1 pyannote/segmentation-3.0; do
      curl -sL -o /tmp/x.bin -w "$m -> %{http_code}\n" \
        -H "Authorization: Bearer $HF" \
@@ -96,26 +96,53 @@ modal token new       # opens browser, generates a token
 This is one command — Modal injects all of these as env vars into the
 worker container at runtime.
 
+> **Important: do not check the filled-in version of this command into
+> git.** Pull the real values from your private `backend/.env` (which is
+> gitignored). The README uses placeholders intentionally so GitHub's
+> secret scanner doesn't flag the push.
+
 ```bash
 modal secret create justme-secrets \
-  MONGO_URL='mongodb+srv://paawansingaldev_db_user:Pass%23%23Mongo%40123@cluster-justme.hkowwnj.mongodb.net/justme?appName=Cluster-justme&retryWrites=true&w=majority' \
+  MONGO_URL='<your mongo+srv URI; password must be percent-encoded>' \
   DB_NAME='justme' \
-  REDIS_URL='rediss://default:gQAAAAAAASi4AAIgcDI5MDVkMzM2N2YyZGI0MjUwYmNmNzJkZDQ1MmFmYTJhNA@giving-muskox-75960.upstash.io:6379' \
-  R2_ACCESS_KEY_ID='3319638a4404a6bf85448e013a14a65c' \
-  R2_SECRET_ACCESS_KEY='8f589a515c68bb587e26df9a7f2a344114bf014122f5110b49b6a561b9c98c5b' \
-  R2_BUCKET_NAME='justme-r2bucket' \
-  R2_ENDPOINT_URL='https://7e2ceff51ed2586cee6ac9ad9cc55b6d.r2.cloudflarestorage.com' \
-  HF_TOKEN='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' \
+  REDIS_URL='<your Upstash rediss:// URL>' \
+  R2_ACCESS_KEY_ID='<R2 access key>' \
+  R2_SECRET_ACCESS_KEY='<R2 secret>' \
+  R2_BUCKET_NAME='<R2 bucket name>' \
+  R2_ENDPOINT_URL='https://<ACCOUNT_ID>.r2.cloudflarestorage.com' \
+  HF_TOKEN='hf_<your huggingface read token>' \
   MAX_VIDEO_HOURS='15'
 ```
 
-> Notes on the values above:
-> - The Mongo password's `#` and `@` are **percent-encoded** (`%23%23` and `%40`)
->   because they're URI-reserved. Leave them as-is — pymongo decodes them.
-> - The R2 endpoint is the bare account URL, **without** `/justme-r2bucket`
->   appended.
-> - If any of these secrets ever leak, rotate them in the source provider
->   AND re-run `modal secret create` to update Modal.
+Quick way to read the right values out of your local environment without
+copy-pasting one by one:
+
+```bash
+# from your project root, prints the modal command with the real values:
+( set -a && . backend/.env && set +a
+  cat <<EOF
+modal secret create justme-secrets \\
+  MONGO_URL='\$MONGO_URL' \\
+  DB_NAME='\$DB_NAME' \\
+  REDIS_URL='\$REDIS_URL' \\
+  R2_ACCESS_KEY_ID='\$R2_ACCESS_KEY_ID' \\
+  R2_SECRET_ACCESS_KEY='\$R2_SECRET_ACCESS_KEY' \\
+  R2_BUCKET_NAME='\$R2_BUCKET_NAME' \\
+  R2_ENDPOINT_URL='\$R2_ENDPOINT_URL' \\
+  HF_TOKEN='\$HF_TOKEN' \\
+  MAX_VIDEO_HOURS='\$MAX_VIDEO_HOURS'
+EOF
+)
+```
+
+> Reminders on the values when you paste them:
+> - The Mongo password's `#` and `@` characters must be percent-encoded
+>   (`#` -> `%23`, `@` -> `%40`) — pymongo decodes them transparently.
+> - `R2_ENDPOINT_URL` is the bare account URL, **without** the bucket
+>   name appended.
+> - If any of these credentials ever leak (e.g. accidentally committed
+>   to git), rotate them in the source provider AND re-run
+>   `modal secret create justme-secrets ...` to update Modal.
 
 ### 3. Deploy
 

@@ -95,7 +95,7 @@ Verified:
 - Ruff lint clean across `/app/backend/app` and `/app/shared`.
 
 Credentials supplied by user (stored in `/app/backend/.env`):
-- R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME=`justme-r2bucket`,
+- R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME (user's R2 bucket),
   R2_ENDPOINT_URL (corrected to base endpoint — user originally appended
   the bucket path, which boto3 doesn't expect).
 
@@ -162,7 +162,7 @@ Verified end-to-end (curl):
 
 Infrastructure:
 - Upstash Redis URL stored in `/app/backend/.env`
-  (`rediss://...giving-muskox-75960.upstash.io:6379`).
+  (user's Upstash account; rediss:// TLS URL).
 - Celery worker started locally as background process (NOT supervised —
   the supervisor config is read-only on Emergent and the production worker
   ships externally). Restart with:
@@ -573,7 +573,7 @@ Verified (in container, against synthetic videos built on the fly):
 - **Frontend State D** with the real artifact: navigated to a finished
   job, the `Download Video` button rendered with a 386-character
   presigned URL pointing at the configured R2 endpoint
-  (`7e2ceff51ed2586cee6ac9ad9cc55b6d.r2.cloudflarestorage.com`). The
+  (the user's R2 account, ending in `.r2.cloudflarestorage.com`). The
   M2 placeholder is gone; the "Process another video" link works.
 
 Pipeline-level state now (nothing mocked on the worker beyond the dev
@@ -665,7 +665,7 @@ the new retry knobs + time limits.
 Implemented:
 
 1. **Credentials finalised** in `/app/backend/.env`:
-   - `HF_TOKEN` set (HF account: `paawansingal.dev@gmail.com`).
+   - `HF_TOKEN` set (user's HuggingFace account).
    - All other env vars unchanged from M0-M7
      (`MONGO_URL`, `DB_NAME`, `REDIS_URL`, `R2_*`, `MAX_VIDEO_HOURS=15`).
 
@@ -728,7 +728,7 @@ Files added/modified this milestone:
 Outstanding for the user (last-mile, takes ~10 minutes):
 - Accept the second pyannote license at
   `https://huggingface.co/pyannote/segmentation-3.0` on the
-  `paawansingal.dev@gmail.com` HF account.
+  the same HF account that owns HF_TOKEN.
 - `pip install modal && modal token new`.
 - `modal secret create justme-secrets ...` (the exact command is in
   the README).
