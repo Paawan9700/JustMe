@@ -1,0 +1,74 @@
+"""
+Shared constants used by both the API (backend) and the Worker.
+
+Anything that needs to stay in sync between the two services (job status
+values, R2 object key naming) lives here so there is exactly one source
+of truth.
+"""
+
+from enum import Enum
+
+
+class JobStatus(str, Enum):
+    """
+    Lifecycle of a single JustMe job.
+
+    Order of progression (happy path):
+        QUEUED
+          -> DOWNLOADING
+          -> EXTRACTING_AUDIO
+          -> DIARIZING
+          -> GENERATING_SNIPPETS
+          -> AWAITING_SELECTION      (waits for user to pick their voice)
+          -> RENDERING
+          -> DONE
+
+    FAILED is terminal from any state.
+    """
+
+    QUEUED = "QUEUED"
+    DOWNLOADING = "DOWNLOADING"
+    EXTRACTING_AUDIO = "EXTRACTING_AUDIO"
+    DIARIZING = "DIARIZING"
+    GENERATING_SNIPPETS = "GENERATING_SNIPPETS"
+    AWAITING_SELECTION = "AWAITING_SELECTION"
+    RENDERING = "RENDERING"
+    DONE = "DONE"
+    FAILED = "FAILED"
+
+
+# ---------------------------------------------------------------------------
+# R2 object key naming
+# ---------------------------------------------------------------------------
+# All worker/API code MUST go through these helpers when reading/writing R2,
+# so the layout stays consistent and is easy to debug from the R2 dashboard.
+#
+# Layout:
+#   jobs/{job_id}/source.mp4
+#   jobs/{job_id}/audio.wav
+#   jobs/{job_id}/snippets/{speaker_label}.mp3
+#   jobs/{job_id}/final.mp4
+# ---------------------------------------------------------------------------
+
+def r2_key_source_video(job_id: str) -> str:
+    """Original video downloaded from YouTube."""
+    return f"jobs/{job_id}/source.mp4"
+
+
+def r2_key_audio(job_id: str) -> str:
+    """Extracted audio track used for diarization."""
+    return f"jobs/{job_id}/audio.wav"
+
+
+def r2_key_snippet(job_id: str, speaker_label: str) -> str:
+    """
+    Short identification clip for one diarized speaker.
+
+    `speaker_label` is whatever pyannote returns, e.g. "SPEAKER_00".
+    """
+    return f"jobs/{job_id}/snippets/{speaker_label}.mp3"
+
+
+def r2_key_final_video(job_id: str) -> str:
+    """Final stitched video of only the selected speaker."""
+    return f"jobs/{job_id}/final.mp4"
