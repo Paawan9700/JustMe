@@ -38,6 +38,39 @@ class JobStatus(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# State machine
+# ---------------------------------------------------------------------------
+# Linear pipeline. ANY -> FAILED is always legal and is appended below.
+
+_LINEAR_TRANSITIONS: dict[str, set[str]] = {
+    JobStatus.QUEUED.value: {JobStatus.DOWNLOADING.value},
+    JobStatus.DOWNLOADING.value: {JobStatus.EXTRACTING_AUDIO.value},
+    JobStatus.EXTRACTING_AUDIO.value: {JobStatus.DIARIZING.value},
+    JobStatus.DIARIZING.value: {JobStatus.GENERATING_SNIPPETS.value},
+    JobStatus.GENERATING_SNIPPETS.value: {JobStatus.AWAITING_SELECTION.value},
+    JobStatus.AWAITING_SELECTION.value: {JobStatus.RENDERING.value},
+    JobStatus.RENDERING.value: {JobStatus.DONE.value},
+    JobStatus.DONE.value: set(),
+    JobStatus.FAILED.value: set(),
+}
+
+ALLOWED_TRANSITIONS: dict[str, set[str]] = {
+    src: (targets | {JobStatus.FAILED.value}) if src != JobStatus.FAILED.value else set()
+    for src, targets in _LINEAR_TRANSITIONS.items()
+}
+
+
+def is_legal_transition(current: str, new: str) -> bool:
+    """
+    Same-status updates (progress-only) are always allowed. Otherwise
+    consult ALLOWED_TRANSITIONS. ANY -> FAILED is always legal.
+    """
+    if current == new:
+        return True
+    return new in ALLOWED_TRANSITIONS.get(current, set())
+
+
+# ---------------------------------------------------------------------------
 # R2 object key naming
 # ---------------------------------------------------------------------------
 # All worker/API code MUST go through these helpers when reading/writing R2,

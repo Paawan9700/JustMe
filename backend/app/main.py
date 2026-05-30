@@ -15,6 +15,7 @@ import anyio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.jobs import router as jobs_router
 from app.db.mongo import close_db, init_db, ping as mongo_ping
 from app.services.storage import get_storage
 
@@ -86,3 +87,9 @@ async def health_api():
 async def api_root():
     """Cheap liveness probe for the /api prefix."""
     return {"service": "JustMe API", "version": "0.1.0"}
+
+
+# ---------------------------------------------------------------------------
+# Routers
+# ---------------------------------------------------------------------------
+app.include_router(jobs_router)

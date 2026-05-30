@@ -100,10 +100,76 @@ Credentials supplied by user (stored in `/app/backend/.env`):
   the bucket path, which boto3 doesn't expect).
 
 Deferred (waiting on user to specify the milestone before building):
-- M1: Job creation/status API endpoints
 - M2: React UI
 - M3–M6: Worker tasks (ingest, audio, diarize, snippets, render),
   Celery wiring, Redis + HF token
+
+---
+
+### M1: Job Lifecycle API — ✅ DONE (Jan 2026)
+Implemented:
+- **Models** (`backend/app/models/job.py`): JobCreateRequest, JobCreateResponse,
+  SelectSpeakerRequest, SelectSpeakerResponse, JobResponse (with hydrated
+  presigned URLs), JobProgress, JobError, SpeakerInfoResponse.
+- **State machine** moved into `shared/constants.py` (`ALLOWED_TRANSITIONS`,
+  `is_legal_transition`) — single source of truth for both API (async) and
+  Worker (sync). Same-status updates are progress-only (no transition
+  validation). ANY -> FAILED always legal.
+- **job_service.py**: async CRUD against Motor + atomic transitions
+  (`find_one_and_update` with CAS on current status):
+    * `create_job(youtube_url)` -> doc with status=QUEUED, task_id=null
+    * `set_task_id(job_id, task_id)`
+    * `get_job_raw / get_job_hydrated` (hydrated injects snippet_urls when
+      status >= AWAITING_SELECTION, download_url when status == DONE).
+    * `transition_status / update_progress`
+    * `select_speaker(job_id, label)` -> atomically sets
+      `selected_speaker` AND moves AWAITING_SELECTION -> RENDERING.
+- **queue.py**: Celery client; `enqueue_process_video`, `enqueue_render_video`
+  by task NAME (API does not import worker code). Handles `rediss://` SSL
+  param injection automatically.
+- **api/jobs.py** (mounted under `/api/jobs`):
+    * `POST /api/jobs`  -> 201 + {job_id, status}; URL validation (host
+      allowlist for youtube.com / youtu.be / m.youtube.com / shorts /
+      embed); rejects `/live/`.  Enqueues `process_video`. On enqueue
+      failure marks job FAILED + returns 502.
+    * `GET /api/jobs/{id}` -> 200 hydrated JobResponse, 404 if missing.
+    * `POST /api/jobs/{id}/select-speaker` -> 200/RENDERING, 404, 409
+      (wrong state), 400 (speaker not in job).
+- **Worker** (`/app/worker`):
+    * `celery_app.py` — loads `/app/backend/.env` if present; Celery
+      pointed at Upstash with SSL param injection; task_acks_late + low
+      prefetch.
+    * `db.py` — sync pymongo helper.
+    * `tasks/dummy.py` — `process_video` and `render_video` simulate the
+      full pipeline with sleeps + atomic transitions. Each fake speaker
+      has `snippet_key: null` per spec (snippet_url renders null too).
+- **Backend entrypoint** (`backend/server.py`): inserts `/app` into
+  `sys.path` so `shared` package is importable.
+
+Verified end-to-end (curl):
+- POST /api/jobs (valid) -> 201
+- POST /api/jobs (vimeo) -> 400 "URL is not a YouTube URL"
+- POST /api/jobs (/live/) -> 400 "Livestreams are not supported"
+- GET /api/jobs/{id} -> watched status walk:
+  QUEUED -> DOWNLOADING -> EXTRACTING_AUDIO -> DIARIZING ->
+  GENERATING_SNIPPETS -> AWAITING_SELECTION -> RENDERING -> DONE
+- POST select-speaker while DOWNLOADING -> **409** (key acceptance)
+- POST select-speaker with bogus label -> **400** "Speaker SPEAKER_99 not found"
+- POST select-speaker valid -> **200** + status=RENDERING
+- POST select-speaker while RENDERING -> 409
+- GET unknown id -> 404
+- External preview URL (youtu.be shortlink) -> 201
+
+Infrastructure:
+- Upstash Redis URL stored in `/app/backend/.env`
+  (`rediss://...giving-muskox-75960.upstash.io:6379`).
+- Celery worker started locally as background process (NOT supervised —
+  the supervisor config is read-only on Emergent and the production worker
+  ships externally). Restart with:
+    `cd /app && nohup /root/.venv/bin/celery -A worker.celery_app worker --loglevel=info --concurrency=2 > /var/log/justme/worker.log 2>&1 &`
+
+Deferred (waiting on user to specify the milestone before building):
+- M2: React UI
 
 ## Next Action Items
 - Wait for user to send Milestone 1.

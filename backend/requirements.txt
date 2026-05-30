@@ -1,19 +1,25 @@
 aiohappyeyeballs==2.6.2
 aiohttp==3.13.5
 aiosignal==1.4.0
+amqp==5.3.1
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.13.0
 ast_serialize==0.5.0
 attrs==26.1.0
 bcrypt==4.1.3
+billiard==4.2.4
 black==26.5.1
 boto3==1.43.14
 botocore==1.43.14
+celery==5.4.0
 certifi==2026.5.20
 cffi==2.0.0
 charset-normalizer==3.4.7
 click==8.4.1
+click-didyoumean==0.3.1
+click-plugins==1.1.1.2
+click-repl==0.3.0
 cryptography==48.0.0
 distro==1.9.0
 dnspython==2.8.0
@@ -52,6 +58,7 @@ jmespath==1.1.0
 jq==1.11.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
+kombu==5.6.2
 librt==0.11.0
 litellm @ https://customer-assets.emergentagent.com/internal-asset/library/litellm-1.80.0-py3-none-any.whl#sha256=adf398c513273de9341f61822296c6b2145f7f2dc4a69daf3ac04829f5bde3f8
 markdown-it-py==4.2.0
@@ -72,6 +79,7 @@ pathspec==1.1.1
 pillow==12.2.0
 platformdirs==4.9.6
 pluggy==1.6.0
+prompt_toolkit==3.0.52
 propcache==0.5.2
 proto-plus==1.28.0
 protobuf==5.29.6
@@ -94,6 +102,7 @@ python-jose==3.5.0
 python-multipart==0.0.29
 pytokens==0.4.1
 PyYAML==6.0.3
+redis==5.3.1
 referencing==0.37.0
 regex==2026.5.9
 requests==2.34.2
@@ -119,7 +128,9 @@ tzdata==2026.2
 uritemplate==4.2.0
 urllib3==2.7.0
 uvicorn==0.25.0
+vine==5.1.0
 watchfiles==1.2.0
+wcwidth==0.7.0
 websockets==16.0
 yarl==1.24.2
 zipp==4.1.0
