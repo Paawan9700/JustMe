@@ -3,10 +3,15 @@ Real speaker diarization (WhisperX + pyannote.audio).
 
 IMPORTANT SETUP: Before this works, you must:
 1. Create a free account at huggingface.co
-2. Go to https://huggingface.co/pyannote/speaker-diarization-3.1
-   and accept the license agreement
-3. Go to https://huggingface.co/settings/tokens and create a token
-4. Set HF_TOKEN environment variable to that token
+2. Accept the license on BOTH of these gated models (the diarization
+   pipeline loads segmentation as a dependency, so one isn't enough):
+     - https://huggingface.co/pyannote/speaker-diarization-3.1
+     - https://huggingface.co/pyannote/segmentation-3.0
+   Click "Agree and access repository" on each, signed in to the same
+   HF account that owns HF_TOKEN.
+3. Go to https://huggingface.co/settings/tokens and create a token with
+   read access.
+4. Set HF_TOKEN environment variable to that token.
 
 Runs on the GPU worker only. The heavy imports (whisperx, torch) are
 done lazily inside `run_diarization()` so the module is safely importable
@@ -158,10 +163,11 @@ def run_diarization(
         if "401" in msg or "unauthorized" in msg or "gated" in msg or "access" in msg:
             raise DiarizationError(
                 "HF_ACCESS_DENIED",
-                "HuggingFace access denied. Make sure you've accepted the "
-                "license agreement at "
+                "HuggingFace access denied. Accept the license on BOTH "
+                "models on the same account as HF_TOKEN: "
                 "https://huggingface.co/pyannote/speaker-diarization-3.1 "
-                "and that HF_TOKEN has read access.",
+                "and https://huggingface.co/pyannote/segmentation-3.0 "
+                "(the diarization pipeline depends on the segmentation model).",
             ) from exc
         raise DiarizationError(
             "DIARIZE_FAILED",

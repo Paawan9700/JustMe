@@ -659,6 +659,88 @@ Verified:
 Worker restarted; `process_video` + `render_video` re-registered with
 the new retry knobs + time limits.
 
+---
+
+### M8: Wire-Up + Deployment Documentation — ✅ DONE (Jan 2026)
+Implemented:
+
+1. **Credentials finalised** in `/app/backend/.env`:
+   - `HF_TOKEN` set (HF account: `paawansingal.dev@gmail.com`).
+   - All other env vars unchanged from M0-M7
+     (`MONGO_URL`, `DB_NAME`, `REDIS_URL`, `R2_*`, `MAX_VIDEO_HOURS=15`).
+
+2. **HF token live-tested** against the HuggingFace API:
+   - `whoami-v2` -> 200 (token valid, read scope).
+   - `pyannote/speaker-diarization-3.1/resolve/main/config.yaml` -> 200
+     (license accepted on this account).
+   - `pyannote/segmentation-3.0/resolve/main/pytorch_model.bin` -> **403**
+     ("Access to model pyannote/segmentation-3.0 is restricted...").
+   - **The diarization pipeline depends on the segmentation model too**,
+     so the M4 worker will fail at model-load until that second license
+     is accepted on the same account. Both the M4 error message and the
+     new worker README now explicitly list both URLs.
+
+3. **`worker/modal_app.py`** — production Modal wrapper for the Celery
+   worker (Modal was selected by user as platform to document first):
+   - `Image.from_registry(pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime,
+     add_python="3.11")`, apt ffmpeg+git, pip from `requirements.txt`,
+     whisperx from git, bakes `worker/` and `shared/` into `/app/`.
+   - `@app.function(gpu="A10G", cpu=4, memory=16384, timeout=7800,
+     keep_warm=1, allow_concurrent_inputs=1)` so Modal keeps one
+     instance warm to drain the Upstash queue.
+   - Reads from `modal.Secret.from_name("justme-secrets")`. Validates
+     all required env vars at startup and fails loud if any missing.
+   - Hands off to `celery -A worker.celery_app worker --loglevel=info
+     --concurrency=1`. concurrency=1 is the GPU OOM guard.
+   - Local entrypoint `modal run worker/modal_app.py` for smoke tests.
+
+4. **`worker/README.md`** — single-source-of-truth deployment guide:
+   - Architecture diagram (API <-> Redis <-> worker <-> R2).
+   - Prereq table with where to get each credential.
+   - **HuggingFace setup with the segmentation-3.0 gotcha called out**,
+     including a 5-line curl snippet the user can run to verify license
+     acceptance against their token before deploying.
+   - **Modal path** (primary): install, token, `modal secret create
+     justme-secrets ...`, `modal deploy worker/modal_app.py`, scale tweaks.
+   - **RunPod path**: docker build from project root,
+     `docker push USER/justme-worker`, RunPod pod config table with GPU
+     recommendation (RTX 4090 / A40 / A10G), 50 GB container disk,
+     16 GB RAM, env-var list, spot-pod cost tip.
+   - Env-var reference table (9 vars).
+   - Cloudflare R2 lifecycle rule walkthrough (mirrors the M7 TODO
+     in `worker/utils/storage.py`).
+   - **End-to-end test checklist** matching the M8 spec verbatim
+     (steps 1-8: submit URL -> watch each state -> verify download).
+   - Troubleshooting table with the 5 most likely failure modes and
+     their fixes.
+
+5. **`/health` verified green** locally and through the external
+   Emergent preview URL after the env-var change. Worker rebooted to
+   pick up the new env.
+
+Files added/modified this milestone:
+   /app/backend/.env           (HF_TOKEN populated)
+   /app/worker/modal_app.py    (new, 130 lines)
+   /app/worker/README.md       (new, ~290 lines)
+   /app/worker/tasks/diarize.py (HF setup docstring + error message
+                                 now mention both license URLs)
+
+Outstanding for the user (last-mile, takes ~10 minutes):
+- Accept the second pyannote license at
+  `https://huggingface.co/pyannote/segmentation-3.0` on the
+  `paawansingal.dev@gmail.com` HF account.
+- `pip install modal && modal token new`.
+- `modal secret create justme-secrets ...` (the exact command is in
+  the README).
+- `modal deploy worker/modal_app.py`.
+- Configure R2 lifecycle rule (`jobs/` prefix, 7 days, in the
+  Cloudflare dashboard).
+- Run the end-to-end test checklist.
+
+The pipeline cannot be fully exercised inside Emergent (YouTube
+datacenter IP block at M3 download); on Modal/RunPod the same code
+runs end-to-end without modification.
+
 Deferred (waiting on user to specify the milestone before building):
 
 ## Next Action Items
