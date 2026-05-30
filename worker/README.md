@@ -144,18 +144,26 @@ EOF
 >   to git), rotate them in the source provider AND re-run
 >   `modal secret create justme-secrets ...` to update Modal.
 
-### 3. Deploy
+### 3. Deploy AND start
 
 From the **project root** (so `modal_app.py` can see both `worker/`
 and `shared/`):
 
 ```bash
 modal deploy worker/modal_app.py
+modal run --detach worker/modal_app.py::run_worker
 ```
 
-You'll see the build run once (apt → pip → whisperx). On success
-Modal prints the app URL. The worker is now warm and consuming the
-Redis queue.
+> **Both commands are required.** `modal deploy` only registers the
+> function — it does not invoke it. `modal run --detach` is what
+> actually starts the long-running Celery worker process. With
+> `retries=10` configured in `modal_app.py`, Modal will auto-restart
+> the worker when the 24h outer timeout fires (or if it crashes), so
+> the worker stays alive without further intervention.
+
+You'll see the build run once (apt → pip → whisperx). After
+`modal run --detach`, the command returns a function-call ID and the
+worker is running in the background, consuming the Redis queue.
 
 ### 4. Test it
 
@@ -164,6 +172,8 @@ Submit a real video via your deployed frontend (or `curl POST
 
 - <https://modal.com/apps> → `justme-worker` → "Run history"
 - Logs in real-time: `modal app logs justme-worker`
+- Stop the worker (e.g. before a fresh deploy):
+  `modal app stop justme-worker`
 
 ### 5. Scale tweaks
 

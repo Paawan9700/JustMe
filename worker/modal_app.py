@@ -12,7 +12,9 @@ rewriting the API's services/queue.py and every job-status flow.
 Wrapping Celery preserves the architecture and gives us GPU on Modal
 with one file.
 
-Deploy:
+Deploy + start (you need BOTH steps — `modal deploy` only registers the
+function with Modal; it does not start a long-running daemon):
+
     pip install modal
     modal token new
     modal secret create justme-secrets \\
@@ -21,10 +23,17 @@ Deploy:
         R2_BUCKET_NAME=... R2_ENDPOINT_URL=https://<acct>.r2.cloudflarestorage.com \\
         HF_TOKEN=hf_... MAX_VIDEO_HOURS=15
     modal deploy worker/modal_app.py
+    modal run --detach worker/modal_app.py::run_worker      # <-- ACTUALLY starts the worker
 
-Modal will keep one container warm (keep_warm=1) so the celery worker
-is always available to drain the Upstash Redis queue. To temporarily
-scale to zero (e.g. during off-hours), set keep_warm=0 here and redeploy.
+After the `--detach` call returns a function-call ID, the worker is
+running in the background and consuming the Redis queue. The
+`retries=Retries(max_retries=10)` setting auto-restarts the container
+when Modal's 24h outer timeout fires or if Celery crashes.
+
+To check it's alive:
+    modal app logs justme-worker --tail 100        # should show celery banner
+To stop it for redeploy:
+    modal app stop justme-worker
 """
 
 from __future__ import annotations
@@ -69,14 +78,25 @@ app = modal.App("justme-worker", image=image)
     gpu="A10G",            # WhisperX large-v2 fits in ~10 GB VRAM
     cpu=4.0,
     memory=16384,          # 16 GB RAM
-    timeout=7800,          # 2h10m — matches worker/celery_app.py hard limit
-    min_containers=1,           # always 1 instance up to drain the queue
+    # Modal's per-invocation max is 24h. We use it for the outer daemon
+    # process so the container lives as long as Modal will let it; when
+    # the timeout fires, Modal kills the container and the `retries` setting
+    # below auto-spawns a replacement, restarting the celery worker. The
+    # per-task time limit (2h soft / 2h10m hard) is enforced separately by
+    # Celery in worker/celery_app.py.
+    timeout=86400,
+    retries=modal.Retries(max_retries=10, backoff_coefficient=1.0, initial_delay=5.0),
+    min_containers=1,      # keep one warm container so cold-starts don't add latency
     # @modal.concurrent=1,  # one Modal invocation; celery handles in-process concurrency
 )
 def run_worker() -> None:
     """
-    Long-running entrypoint. Modal wakes this up, then `celery worker`
-    blocks indefinitely consuming jobs from Upstash Redis.
+    Long-running entrypoint. Modal invokes this on `modal run --detach`,
+    then `celery worker` blocks indefinitely consuming jobs from Upstash
+    Redis. When the 24h outer timeout fires, Modal kills the container
+    and (because of `retries=...`) auto-spawns a fresh one, picking up
+    where the previous worker left off (task_acks_late=True ensures no
+    in-flight task is lost).
     """
     import os
     import subprocess
