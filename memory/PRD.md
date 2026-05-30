@@ -446,6 +446,71 @@ Awaiting from user (when ready to deploy real M4):
 - `HF_TOKEN` (HuggingFace token with the
   `pyannote/speaker-diarization-3.1` license accepted).
 
+---
+
+### M5: Per-Speaker Snippets — ✅ DONE (Jan 2026)
+Implemented:
+- **`worker/tasks/snippets.py`** — `generate_snippets(job_id, job_dir)`:
+    1. Transitions to GENERATING_SNIPPETS, progress 0%.
+    2. Reads `speakers` + `artifacts.source_video_key` + `duration_sec`
+       from the job doc.
+    3. **Skip path** when `source_video_key` is null OR speakers list is
+       empty — logs warning, snippet_key stays null on every speaker,
+       still transitions to AWAITING_SELECTION. This is the only branch
+       that runs in the Emergent dev container (where the real source
+       video never makes it to R2 because of the YouTube datacenter
+       IP block).
+    4. **Hot path** (`_do_snippets`) when both are present:
+       a. Downloads source.mp4 from R2 if not already on local disk
+          (normal flow leaves it there from ingest). Download failure ->
+          `SnippetError("SOURCE_DOWNLOAD_FAILED", ...)` -> job FAILED.
+       b. For each speaker: picks the longest segment from the
+          `segments` collection, computes the 6-second window
+          centred on its midpoint (`max(0, mid-3)` start, clamped to
+          `duration_sec` at end), runs the exact spec'd ffmpeg:
+          `ffmpeg -ss S -to E -i source.mp4 -vn -acodec mp3 -ab 128k
+          snippet_LABEL.mp3 -y`, uploads to R2 at
+          `r2_key_snippet(job_id, label)`, updates
+          `speakers.$.snippet_key` via positional Mongo update.
+       c. **Per-speaker failure tolerance**: if one speaker has no
+          segments (`_NoSegmentsForSpeaker`) or its ffmpeg/upload
+          fails, log warning and continue — other speakers' clips
+          still ship; offending speaker's snippet_key stays null and
+          the M2 UI renders "No preview available" for them.
+       d. Deletes the local source video at the end (spec step 4 —
+          M6 will re-download for the final render).
+    5. Transitions to AWAITING_SELECTION, progress 100%.
+
+- **Orchestrator** (`worker/tasks/dummy.py`):
+    * Removed the placeholder `_dummy_snippets_stage` body — replaced
+      with a call to `snippets.generate_snippets(job_id, job_dir)`.
+      (Kept the symbol as a one-line compat shim for one release.)
+    * Added `snippets_task.SnippetError` to the orchestrator's catch
+      list so any hot-path failure (source download, etc.) surfaces as
+      `job.status=FAILED` with the user-facing message visible in the
+      M2 State E.
+
+Verified (against a synthetic 3-speaker mp4 built on the fly with
+ffmpeg, 30 s, 3 distinct sine frequencies in three 10 s ranges):
+- All 3 snippets uploaded to R2 at the spec'd key path
+  (`jobs/{job_id}/snippets/{label}.mp3`).
+- Each snippet is **6.08 s** (within tolerance) and **codec=mp3,
+  bit_rate=128 000** — matches spec.
+- `job.speakers[].snippet_key` set correctly via positional update.
+- Local source.mp4 wiped after the run.
+- Skip path: job with `source_video_key=null` → reaches
+  AWAITING_SELECTION cleanly with snippet_key=null on all speakers.
+- Partial failure: ghost speaker (no segments) → cleanly skipped;
+  other speakers' snippets still ship.
+- Worker restarted cleanly; `process_video` + `render_video` still
+  registered.
+
+Frontend impact (no code change in `/app/frontend` — already handled
+this in M2):
+- When `snippet_url` is set in the API response, `<SpeakerCard>` now
+  renders a real `<audio controls>` element instead of the "No
+  preview available" placeholder.
+
 Deferred (waiting on user to specify the milestone before building):
 
 ## Next Action Items

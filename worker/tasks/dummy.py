@@ -1,17 +1,19 @@
 """
 Pipeline orchestrator + still-mocked snippet/render stages.
 
-What's real (since M3 / M4):
-  - DOWNLOADING      -> worker.tasks.ingest.download_video
-  - EXTRACTING_AUDIO -> worker.tasks.audio.extract_audio
-  - DIARIZING        -> worker.tasks.diarize.run_diarization
-                        (WhisperX + pyannote, GPU only — dev box falls
-                        back to a mocked 2-speaker fixture so the
-                        Emergent-hosted M2 UI can still be exercised)
+What's real (since M3 / M4 / M5):
+  - DOWNLOADING        -> worker.tasks.ingest.download_video
+  - EXTRACTING_AUDIO   -> worker.tasks.audio.extract_audio
+  - DIARIZING          -> worker.tasks.diarize.run_diarization
+                          (WhisperX + pyannote, GPU only — dev box
+                          falls back to a mocked 2-speaker fixture so
+                          the Emergent-hosted M2 UI can still be
+                          exercised)
+  - GENERATING_SNIPPETS -> worker.tasks.snippets.generate_snippets
+                           (ffmpeg cuts a 6s mp3 per speaker, uploads
+                           to R2, stamps snippet_key on each speaker)
 
-What's still mocked (will land in M5 / M6):
-  - GENERATING_SNIPPETS  -> brief transition with no real snippet upload
-  - AWAITING_SELECTION   -> just transitions in (speakers are real from M4)
+What's still mocked (will land in M6):
   - RENDERING -> DONE    -> render_video task; final_video_key stays null
 
 Real livestream detection happens in ingest via yt-dlp's `is_live` field;
@@ -40,6 +42,7 @@ from worker.state import fail, progress, transition
 from worker.tasks import audio as audio_task
 from worker.tasks import diarize as diarize_task
 from worker.tasks import ingest as ingest_task
+from worker.tasks import snippets as snippets_task
 from shared.constants import JobStatus, r2_key_audio
 
 logger = logging.getLogger(__name__)
@@ -83,8 +86,8 @@ def process_video(self, job_id: str) -> dict[str, Any]:  # noqa: ARG001
         ).get("duration_sec") or 0
         _diarize_or_fallback(job_id, job_dir, duration_sec)
 
-        # ---- GENERATING_SNIPPETS + AWAITING_SELECTION (still mocked) --
-        _dummy_snippets_stage(job_id)
+        # ---- GENERATING_SNIPPETS -> AWAITING_SELECTION (real, M5) -----
+        snippets_task.generate_snippets(job_id, job_dir)
 
         logger.info("process_video[%s] done -> AWAITING_SELECTION", job_id)
         return {"ok": True, "job_id": job_id}
@@ -101,6 +104,11 @@ def process_video(self, job_id: str) -> dict[str, Any]:  # noqa: ARG001
 
     except diarize_task.DiarizationError as exc:
         logger.warning("process_video[%s] diarize failed: %s", job_id, exc.message)
+        fail(job_id, exc.code, exc.message)
+        return {"ok": False, "code": exc.code, "reason": exc.message}
+
+    except snippets_task.SnippetError as exc:
+        logger.warning("process_video[%s] snippets failed: %s", job_id, exc.message)
         fail(job_id, exc.code, exc.message)
         return {"ok": False, "code": exc.code, "reason": exc.message}
 
@@ -170,25 +178,12 @@ def _mock_diarize_for_dev(job_id: str) -> None:
 
 def _dummy_snippets_stage(job_id: str) -> None:
     """
-    Placeholder for M5 (snippet generation).
-
-    Real M5 will: pick a representative segment per speaker, cut it out
-    with ffmpeg, upload to R2, set speakers[].snippet_key for each. For
-    now we just walk the state machine through to AWAITING_SELECTION so
-    the UI flips. job.speakers is already populated by the diarization
-    step.
+    DEPRECATED. The real snippet stage now lives in
+    `worker/tasks/snippets.py:generate_snippets()`. This function is
+    kept for one release as a compatibility shim in case anything
+    external still imports it.
     """
-    transition(
-        job_id, JobStatus.GENERATING_SNIPPETS.value,
-        stage="generating_snippets", percent=0.0,
-        message="Generating identification snippets...",
-    )
-    time.sleep(1)
-    transition(
-        job_id, JobStatus.AWAITING_SELECTION.value,
-        stage="awaiting_selection", percent=100.0,
-        message="Please select your voice",
-    )
+    snippets_task.generate_snippets(job_id, JOB_TMP_ROOT / job_id)
 
 
 # ---------------------------------------------------------------------------
