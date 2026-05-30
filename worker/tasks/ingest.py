@@ -135,6 +135,7 @@ def download_video(job_id: str, youtube_url: str, job_dir: Path) -> Path:
         "noprogress": True,
         "noplaylist": True,
     }
+    _maybe_add_cookies(ydl_opts)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
