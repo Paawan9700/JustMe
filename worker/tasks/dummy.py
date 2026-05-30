@@ -1,10 +1,14 @@
 """
-Dummy worker tasks for Milestone 1.
+Pipeline orchestrator + still-mocked diarization/snippet stages.
 
-These simulate the real video-processing pipeline so the API + frontend
-can be developed end-to-end without the GPU dependencies. They will be
-replaced by real tasks (yt-dlp ingest, ffmpeg audio, WhisperX +
-pyannote diarization, snippet generation, ffmpeg render) in M3-M6.
+What's real (since M3):
+  - DOWNLOADING        -> worker.tasks.ingest.download_video
+  - EXTRACTING_AUDIO   -> worker.tasks.audio.extract_audio
+
+What's still mocked (will land in M5 + M6):
+  - DIARIZING + GENERATING_SNIPPETS + AWAITING_SELECTION
+    (fake speakers SPEAKER_00 / SPEAKER_01 with snippet_key=null)
+  - RENDERING -> DONE (render_video task; final_video_key stays null)
 
 Real livestream detection happens in M3 via yt-dlp metadata.
 We check the 'is_live' field from yt-dlp's info extraction:
@@ -13,146 +17,107 @@ We check the 'is_live' field from yt-dlp's info extraction:
 Do NOT detect livestreams from URL patterns - they are unreliable
 (e.g. completed past livestreams keep the /live/<id> URL form).
 
-When M3 rejects an active livestream, the error message shown to the
-user must be the constant LIVE_STREAM_REJECT_MESSAGE from
-shared/constants.py:
+When the worker rejects an active livestream it uses the constant
+LIVE_STREAM_REJECT_MESSAGE from shared/constants.py:
     "This video is currently live. Please wait until the stream ends
      and try again."
 
-Tasks registered:
-  - process_video(job_id)   - simulates ingest through AWAITING_SELECTION
-  - render_video(job_id)    - simulates final render through DONE
+Tasks registered with Celery:
+  - process_video(job_id)
+  - render_video(job_id)
+
+Local working directory:
+  /tmp/justme/{job_id}/   (created on entry, recursively removed in finally)
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 import time
-from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from worker.celery_app import celery_app
 from worker.db import get_db
-from shared.constants import JobStatus, is_legal_transition
+from worker.state import fail, progress, transition
+from worker.tasks import audio as audio_task
+from worker.tasks import ingest as ingest_task
+from shared.constants import JobStatus
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Sync state helpers (worker-side mirror of app.services.job_service)
-# ---------------------------------------------------------------------------
-
-def _transition(
-    job_id: str,
-    new_status: str,
-    *,
-    stage: str | None = None,
-    percent: float | None = None,
-    message: str | None = None,
-    extra_set: dict[str, Any] | None = None,
-) -> bool:
-    """
-    Conditional update: status -> new_status, enforcing
-    is_legal_transition. Returns True on success, False if the
-    transition was rejected.
-    """
-    db = get_db()
-    doc = db.jobs.find_one({"job_id": job_id}, {"status": 1})
-    if not doc:
-        logger.warning("worker: job %s not found", job_id)
-        return False
-
-    current = doc["status"]
-    if not is_legal_transition(current, new_status):
-        logger.warning(
-            "worker: illegal transition for job %s: %s -> %s",
-            job_id, current, new_status,
-        )
-        return False
-
-    set_doc: dict[str, Any] = {
-        "status": new_status,
-        "updated_at": datetime.now(timezone.utc),
-    }
-    if stage is not None:
-        set_doc["progress.stage"] = stage
-    if percent is not None:
-        set_doc["progress.percent"] = float(percent)
-    if message is not None:
-        set_doc["progress.message"] = message
-    if extra_set:
-        set_doc.update(extra_set)
-
-    res = db.jobs.update_one(
-        {"job_id": job_id, "status": current},
-        {"$set": set_doc},
-    )
-    return res.modified_count == 1
-
-
-def _progress(
-    job_id: str,
-    *,
-    stage: str | None = None,
-    percent: float | None = None,
-    message: str | None = None,
-) -> None:
-    """Progress-only update (no status change)."""
-    db = get_db()
-    set_doc: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
-    if stage is not None:
-        set_doc["progress.stage"] = stage
-    if percent is not None:
-        set_doc["progress.percent"] = float(percent)
-    if message is not None:
-        set_doc["progress.message"] = message
-    db.jobs.update_one({"job_id": job_id}, {"$set": set_doc})
+JOB_TMP_ROOT = Path("/tmp/justme")
 
 
 # ---------------------------------------------------------------------------
-# Task 1: process_video (dummy)
+# Task 1: process_video — ingest -> audio -> (dummy) diarize -> awaiting
 # ---------------------------------------------------------------------------
 
 @celery_app.task(name="process_video", bind=True)
 def process_video(self, job_id: str) -> dict[str, Any]:  # noqa: ARG001
-    """
-    Dummy pipeline: QUEUED -> DOWNLOADING -> EXTRACTING_AUDIO ->
-    DIARIZING -> GENERATING_SNIPPETS -> AWAITING_SELECTION.
-
-    Each step sleeps briefly and updates Mongo so a polling client sees
-    the status change.
-    """
     logger.info("process_video[%s] start", job_id)
 
-    # ---- DOWNLOADING --------------------------------------------------
-    if not _transition(
-        job_id, JobStatus.DOWNLOADING.value,
-        stage="downloading", percent=0.0, message="Starting download",
-    ):
-        return {"ok": False, "reason": "initial transition rejected"}
-    time.sleep(3)
-    _progress(job_id, percent=50.0, message="Downloading video...")
-    time.sleep(3)
+    db = get_db()
+    job = db.jobs.find_one({"job_id": job_id}, {"youtube_url": 1, "_id": 0})
+    if not job:
+        logger.warning("process_video[%s] job not found", job_id)
+        return {"ok": False, "reason": "job not found"}
 
-    # ---- EXTRACTING_AUDIO ---------------------------------------------
-    _transition(
-        job_id, JobStatus.EXTRACTING_AUDIO.value,
-        stage="extracting_audio", percent=100.0,
-        message="Audio extraction complete",
-    )
-    time.sleep(3)
+    youtube_url = job["youtube_url"]
+    job_dir = JOB_TMP_ROOT / job_id
 
-    # ---- DIARIZING ----------------------------------------------------
-    _transition(
+    try:
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        # ---- DOWNLOADING (real) ---------------------------------------
+        local_video = ingest_task.download_video(job_id, youtube_url, job_dir)
+
+        # ---- EXTRACTING_AUDIO (real) ----------------------------------
+        audio_task.extract_audio(job_id, local_video, job_dir)
+
+        # Both artifacts are in R2 now; local files no longer needed
+        # for the dummy diarization that follows. We'll still wipe the
+        # whole job_dir in `finally`.
+
+        # ---- DIARIZING (still mocked — replaced in M5) ----------------
+        _run_dummy_diarization(job_id)
+
+        logger.info("process_video[%s] done -> AWAITING_SELECTION", job_id)
+        return {"ok": True, "job_id": job_id}
+
+    except ingest_task.IngestError as exc:
+        logger.warning("process_video[%s] ingest failed: %s", job_id, exc.message)
+        fail(job_id, exc.code, exc.message)
+        return {"ok": False, "code": exc.code, "reason": exc.message}
+
+    except audio_task.AudioExtractionError as exc:
+        logger.warning("process_video[%s] audio failed: %s", job_id, exc.message)
+        fail(job_id, exc.code, exc.message)
+        return {"ok": False, "code": exc.code, "reason": exc.message}
+
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("process_video[%s] unexpected error", job_id)
+        fail(job_id, "WORKER_ERROR", f"Unexpected worker error: {exc!s}"[:300])
+        return {"ok": False, "code": "WORKER_ERROR", "reason": str(exc)}
+
+    finally:
+        # Disk hygiene — always remove the job's local working dir.
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+
+def _run_dummy_diarization(job_id: str) -> None:
+    """Placeholder for the M5 diarization. Same behaviour as M1 dummy."""
+    transition(
         job_id, JobStatus.DIARIZING.value,
-        stage="diarizing", percent=0.0, message="Diarization starting",
+        stage="diarizing", percent=0.0,
+        message="Diarization starting",
     )
     time.sleep(2)
-    _progress(job_id, percent=50.0, message="Diarizing speakers...")
+    progress(job_id, percent=50.0, message="Diarizing speakers...")
     time.sleep(2)
-    _progress(job_id, percent=100.0, message="Diarization complete")
+    progress(job_id, percent=100.0, message="Diarization complete")
 
-    # ---- GENERATING_SNIPPETS + fake speakers --------------------------
     fake_speakers = [
         {
             "label": "SPEAKER_00",
@@ -167,45 +132,33 @@ def process_video(self, job_id: str) -> dict[str, Any]:  # noqa: ARG001
             "snippet_key": None,
         },
     ]
-    _transition(
+    transition(
         job_id, JobStatus.GENERATING_SNIPPETS.value,
         stage="generating_snippets", percent=0.0,
         message="Generating identification snippets",
         extra_set={"speakers": fake_speakers},
     )
     time.sleep(2)
-
-    # ---- AWAITING_SELECTION -------------------------------------------
-    _transition(
+    transition(
         job_id, JobStatus.AWAITING_SELECTION.value,
         stage="awaiting_selection", percent=100.0,
         message="Please select your voice",
     )
-    logger.info("process_video[%s] done -> AWAITING_SELECTION", job_id)
-    return {"ok": True, "job_id": job_id}
 
 
 # ---------------------------------------------------------------------------
-# Task 2: render_video (dummy)
+# Task 2: render_video (still mocked — real in M6)
 # ---------------------------------------------------------------------------
 
 @celery_app.task(name="render_video", bind=True)
 def render_video(self, job_id: str) -> dict[str, Any]:  # noqa: ARG001
-    """
-    Dummy renderer: RENDERING -> DONE.
-
-    The API has already moved the job to RENDERING via select_speaker(),
-    so this task only needs to simulate work and then mark DONE.
-    """
     logger.info("render_video[%s] start", job_id)
 
-    # Job is already in RENDERING when we get here (set atomically by the
-    # API). Just emit progress updates.
-    _progress(job_id, stage="rendering", percent=0.0, message="Rendering started")
+    progress(job_id, stage="rendering", percent=0.0, message="Rendering started")
     time.sleep(5)
-    _progress(job_id, percent=80.0, message="Stitching segments...")
+    progress(job_id, percent=80.0, message="Stitching segments...")
 
-    _transition(
+    transition(
         job_id, JobStatus.DONE.value,
         stage="done", percent=100.0, message="Render complete",
     )

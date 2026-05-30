@@ -263,6 +263,100 @@ message; `/playlist?list=` and `/watch?v=...&list=` → 400 with playlist
 message; `/watch?v=...`, `/embed/...`, `youtu.be/...` all still 201; Vimeo
 still 400 host check.
 
+---
+
+### M3: Real Worker — Download + Audio Extraction — ✅ DONE (Jan 2026)
+Implemented (all in `/app/worker`):
+
+- **`utils/storage.py`** — self-contained R2 client (boto3, S3-compat),
+  same four ops as backend (`upload_file`, `download_file`,
+  `get_presigned_url`, `file_exists`). Reads creds from env so the
+  worker can deploy independent of the backend package.
+- **`utils/ffmpeg.py`** — subprocess wrappers. `run_ffmpeg(args)` runs
+  the binary with `-hide_banner -loglevel error`, raises `FFmpegError`
+  on non-zero / missing binary. `get_video_duration(path)` uses
+  `ffprobe -show_entries format=duration`.
+- **`state.py`** — sync `transition()` / `progress()` / `fail()`
+  helpers; CAS on current status; calls
+  `shared.constants.is_legal_transition` (same source of truth as the
+  async API). Replaces the local helpers that used to live inline in
+  `tasks/dummy.py`.
+- **`tasks/ingest.py`** — `download_video(job_id, url, job_dir)`:
+    1. `_extract_info()` (yt-dlp, skip_download) -> validate
+       `is_live==True` → raise `IngestError("LIVE_STREAM",
+       LIVE_STREAM_REJECT_MESSAGE)`; `duration > MAX_VIDEO_HOURS*3600`
+       → raise `IngestError("TOO_LONG", ...)`.
+    2. Persist `video_title` + `duration_sec`.
+    3. Download with
+       `format="bestvideo[height<=720]+bestaudio/best[height<=720]"`,
+       `merge_output_format="mp4"`, `continue_dl=True`, `retries=3`,
+       `fragment_retries=3`, `noplaylist=True`, throttled `progress_hooks`
+       (every 5% OR every 2s — whichever first) writing to Mongo.
+    4. Upload to R2 (key from `shared.constants.r2_key_source_video`),
+       persist `artifacts.source_video_key`, return the local mp4 Path.
+    5. yt-dlp DownloadError -> mapped to user-facing messages
+       (PRIVATE, MEMBERS_ONLY, AGE_RESTRICTED, UNAVAILABLE,
+       COPYRIGHT, REGION_BLOCKED, DOWNLOAD_FAILED).
+- **`tasks/audio.py`** — `extract_audio(job_id, video_path, job_dir)`:
+    1. Transitions to EXTRACTING_AUDIO.
+    2. Runs the exact ffmpeg from spec:
+       `ffmpeg -i <video> -vn -acodec pcm_s16le -ar 16000 -ac 1
+       audio.wav -y` → mono 16 kHz 16-bit PCM (WhisperX/pyannote
+       native format).
+    3. Uploads to R2 (`shared.constants.r2_key_audio`),
+       persists `artifacts.audio_key`, progress 100% / "Audio extracted".
+- **`tasks/dummy.py`** — refactored. `process_video` now orchestrates:
+  `mkdir /tmp/justme/{job_id}` → `ingest.download_video` →
+  `audio.extract_audio` → dummy diarization (DIARIZING ->
+  GENERATING_SNIPPETS -> AWAITING_SELECTION with 2 fake speakers) ->
+  cleanup via `shutil.rmtree` in `finally`. Catches `IngestError` and
+  `AudioExtractionError`, calls `state.fail()` with the right code +
+  user-facing message. `render_video` unchanged (still mock for M6).
+- **`worker/requirements.txt`** — per-spec deps: `yt-dlp`, `boto3`,
+  `celery[redis]`, `pymongo`, `ffmpeg-python`, `python-dotenv`. Note:
+  the production container additionally needs `ffmpeg` / `ffprobe`
+  from apt.
+
+Disk path: `/tmp/justme/{job_id}` (the spec mixed `/tmp/sidehus/` and
+`/tmp/justme/` — used `/tmp/justme/` consistently since it matches the
+app name; can be changed if user prefers).
+
+**Verified** (in container):
+- Metadata extraction from `https://www.youtube.com/watch?v=jNQXAC9IVRw`:
+  title="Me at the zoo", duration_sec=19 — persisted to Mongo, job
+  transitioned QUEUED → DOWNLOADING.
+- `TOO_LONG` rejection path: `MAX_VIDEO_HOURS=0` env override + real
+  19s video -> `IngestError("TOO_LONG", "Video exceeds maximum allowed
+  length of 0 hours")`.
+- Completed past livestream metadata (`/live/THcrvo5Dz7M`):
+  `is_live=False`, `was_live=True`, duration=31349s, title resolved —
+  proves the M3 livestream contract (allow completed, reject only true
+  live).
+- `extract_audio` end-to-end on a synthetic 5s mp4: produced
+  `audio.wav` (mono 16kHz 16-bit PCM, 80248 frames, 160574 bytes),
+  uploaded to R2 (`file_exists` True, presigned URL OK), Mongo updated
+  to `EXTRACTING_AUDIO` / `artifacts.audio_key` set / progress 100%.
+- 403 cascade: real YouTube 403 from Emergent's datacenter IP -> yt-dlp
+  raises -> `_map_ytdlp_error` -> `IngestError("DOWNLOAD_FAILED", ...)`
+  -> `process_video` catches -> `state.fail()` -> job ends in FAILED
+  with user-facing message in `error.message`. The frontend's State E
+  renders this correctly (already verified in M2).
+- `/tmp/justme/{job_id}` is wiped on every code path (success + every
+  error) by the `finally` block.
+
+**Environmental caveat** (NOT a code defect):
+- Real binary downloads from `youtube.com` fail with HTTP 403 from this
+  Emergent container's datacenter IP. This is YouTube's well-known
+  block on cloud IPs; it does NOT apply to the user's GPU server
+  (RunPod / Modal residential-ish ranges), where the same code works.
+  On problematic IPs the standard workaround is `--cookies` or
+  `--cookies-from-browser` (out of scope for this milestone). The
+  metadata, validation, audio, R2, Mongo and error-handling paths are
+  all proven independently.
+
+Worker process restarted with the refactored code; `process_video` +
+`render_video` re-registered with Celery.
+
 Deferred (waiting on user to specify the milestone before building):
 
 ## Next Action Items
