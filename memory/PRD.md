@@ -511,6 +511,76 @@ this in M2):
   renders a real `<audio controls>` element instead of the "No
   preview available" placeholder.
 
+---
+
+### M6: Final Render — ✅ DONE (Jan 2026)
+Implemented:
+- **`worker/tasks/render.py`** — `run_render(job_id, job_dir)`:
+    1. Transitions to RENDERING (0%, "Preparing your video segments...").
+    2. Pulls job: `selected_speaker`, `artifacts.source_video_key`.
+       Pulls segments where `speaker == selected_speaker`, sorted by
+       start ASC.
+    3. **Skip path** when `source_video_key` is null OR no segments for
+       the selected speaker — transitions straight to DONE with
+       `final_video_key` left null. Activates only in the Emergent
+       dev container (no real source on R2 because of the M3 datacenter
+       block); production never hits it.
+    4. **Hot path**: `final_merge_pass()` merges segments < 2.0s
+       apart (one final pass on top of M4's 1.5s merge) to avoid too
+       many tiny cuts.
+    5. Downloads `source.mp4` from R2 to `job_dir/source.mp4` (progress
+       20%); fail -> `RenderError("SOURCE_DOWNLOAD_FAILED", ...)`.
+    6. For each segment, runs the spec'd re-encode (frame-accurate):
+       `ffmpeg -ss S -to E -i source.mp4 -c:v libx264 -preset veryfast
+       -crf 23 -c:a aac -b:a 128k seg_NNNN.mp4 -y`. Progress 20%->80%
+       proportional to segment count. Empty/missing output triggers
+       `ENCODE_EMPTY`; ffmpeg non-zero triggers `ENCODE_FAILED`.
+    7. Writes `concat_list.txt` with `file 'absolute/path.mp4'` lines.
+    8. Final concat with stream copy:
+       `ffmpeg -f concat -safe 0 -i concat_list.txt -c copy final.mp4
+       -y`. Failure -> `CONCAT_FAILED` / `CONCAT_EMPTY`.
+    9. Uploads to R2 at `r2_key_final_video(job_id)`; failure ->
+       `UPLOAD_FAILED`. Persists `artifacts.final_video_key`.
+    10. Logs `N segments, X.Xs final duration` and transitions to DONE
+        (100%, "Your video is ready!").
+
+- **`final_merge_pass(segments, max_gap_sec=2.0)`** — pure function,
+  unit-tested for 7 cases (empty, single, gap<2 merge, gap>=2 keep,
+  unsorted input, custom threshold, overlap handling).
+
+- **Celery wrapper** in `worker/tasks/dummy.py` — replaced the dummy
+  `render_video` task with a real one. Owns `try/finally` cleanup of
+  `/tmp/justme/{job_id}/` independently of process_video (since render
+  runs as a separate task triggered by select-speaker). Catches
+  `RenderError` -> `state.fail(job_id, code, message)` so any failure
+  surfaces in the M2 State E with the right user-facing message.
+
+Verified (in container, against synthetic videos built on the fly):
+- 7/7 `final_merge_pass` unit tests pass.
+- **Skip path**: dev fallback (`source_video_key=null`) transitions
+  cleanly to DONE with `final_video_key=null`. M2 UI keeps showing
+  the "Download link will appear once the real renderer is wired (M6)"
+  placeholder.
+- **Real e2e**: 30 s synthetic 3-tone mp4 + SPEAKER_01 segments
+  `[11..14.5, 15..16.5, 18..20.5]`. M6 final-merge collapsed all three
+  into a single cut `[11..20.5]` (9.5 s expected). Output: 71689 B mp4,
+  **h264 + aac, 9.58 s duration** (within tolerance), uploaded to R2
+  at `jobs/{job_id}/final.mp4`. `artifacts.final_video_key` set;
+  status DONE; progress 100%.
+- **Celery task end-to-end**: `render_video.run(job_id)` returned
+  `{"ok": True}`; status DONE; R2 final present;
+  `/tmp/justme/{job_id}/` wiped by the finally block.
+- **Frontend State D** with the real artifact: navigated to a finished
+  job, the `Download Video` button rendered with a 386-character
+  presigned URL pointing at the configured R2 endpoint
+  (`7e2ceff51ed2586cee6ac9ad9cc55b6d.r2.cloudflarestorage.com`). The
+  M2 placeholder is gone; the "Process another video" link works.
+
+Pipeline-level state now (nothing mocked on the worker beyond the dev
+diarization fallback when whisperx isn't installed):
+  ingest (M3) -> audio (M3) -> diarize (M4) -> snippets (M5)
+  -> select-speaker (API) -> render (M6) -> DONE.
+
 Deferred (waiting on user to specify the milestone before building):
 
 ## Next Action Items

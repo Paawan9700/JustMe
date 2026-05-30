@@ -1,7 +1,7 @@
 """
 Pipeline orchestrator + still-mocked snippet/render stages.
 
-What's real (since M3 / M4 / M5):
+What's real (since M3 / M4 / M5 / M6):
   - DOWNLOADING        -> worker.tasks.ingest.download_video
   - EXTRACTING_AUDIO   -> worker.tasks.audio.extract_audio
   - DIARIZING          -> worker.tasks.diarize.run_diarization
@@ -12,9 +12,14 @@ What's real (since M3 / M4 / M5):
   - GENERATING_SNIPPETS -> worker.tasks.snippets.generate_snippets
                            (ffmpeg cuts a 6s mp3 per speaker, uploads
                            to R2, stamps snippet_key on each speaker)
+  - RENDERING          -> worker.tasks.render.run_render
+                          (ffmpeg cut + concat of the selected speaker's
+                          segments -> final.mp4 -> R2)
 
-What's still mocked (will land in M6):
-  - RENDERING -> DONE    -> render_video task; final_video_key stays null
+Nothing is mocked anymore on the worker side. The Emergent dev container
+still has a few skip paths in snippets/render that activate when the
+real upstream artifacts (source video, segments) aren't available; the
+production GPU worker never hits those.
 
 Real livestream detection happens in ingest via yt-dlp's `is_live` field;
 the URL-pattern check that used to live here was removed in the M2 bug
@@ -42,6 +47,7 @@ from worker.state import fail, progress, transition
 from worker.tasks import audio as audio_task
 from worker.tasks import diarize as diarize_task
 from worker.tasks import ingest as ingest_task
+from worker.tasks import render as render_task
 from worker.tasks import snippets as snippets_task
 from shared.constants import JobStatus, r2_key_audio
 
@@ -187,20 +193,36 @@ def _dummy_snippets_stage(job_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 2: render_video (still mocked — real in M6)
+# Task 2: render_video — real ffmpeg cut + concat (M6)
 # ---------------------------------------------------------------------------
 
 @celery_app.task(name="render_video", bind=True)
 def render_video(self, job_id: str) -> dict[str, Any]:  # noqa: ARG001
+    """
+    Render the user-selected speaker's segments into a single mp4 and
+    upload to R2. The API already transitioned the job to RENDERING
+    before enqueuing us (see select_speaker in job_service.py); we
+    re-affirm that state inside run_render so progress messages stay
+    consistent.
+    """
     logger.info("render_video[%s] start", job_id)
 
-    progress(job_id, stage="rendering", percent=0.0, message="Rendering started")
-    time.sleep(5)
-    progress(job_id, percent=80.0, message="Stitching segments...")
+    job_dir = JOB_TMP_ROOT / job_id
+    try:
+        job_dir.mkdir(parents=True, exist_ok=True)
+        render_task.run_render(job_id, job_dir)
+        logger.info("render_video[%s] done", job_id)
+        return {"ok": True, "job_id": job_id}
 
-    transition(
-        job_id, JobStatus.DONE.value,
-        stage="done", percent=100.0, message="Render complete",
-    )
-    logger.info("render_video[%s] done", job_id)
-    return {"ok": True, "job_id": job_id}
+    except render_task.RenderError as exc:
+        logger.warning("render_video[%s] failed: %s", job_id, exc.message)
+        fail(job_id, exc.code, exc.message)
+        return {"ok": False, "code": exc.code, "reason": exc.message}
+
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("render_video[%s] unexpected error", job_id)
+        fail(job_id, "WORKER_ERROR", f"Unexpected worker error: {exc!s}"[:300])
+        return {"ok": False, "code": "WORKER_ERROR", "reason": str(exc)}
+
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
