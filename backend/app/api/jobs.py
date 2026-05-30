@@ -39,15 +39,21 @@ _YT_HOSTS = {
     "youtube.com", "www.youtube.com", "m.youtube.com",
     "music.youtube.com", "youtu.be",
 }
-# /watch?v=XXX  or /shorts/XXX  or youtu.be/XXX  — covers the formats we
-# actually care about. Worker re-validates via yt-dlp before downloading.
-_YT_WATCH_PATH = re.compile(r"^/(watch|shorts/[\w-]+|embed/[\w-]+)$")
+# Allowed video paths on youtube.com:
+#   /watch (must have ?v=...)
+#   /live/<id>     - includes COMPLETED past livestreams, fully recorded.
+#                    Whether a stream is happening right now is decided by
+#                    yt-dlp's `is_live` metadata in M3, NOT by URL pattern.
+#   /embed/<id>
+# Shorts and playlists are rejected with dedicated messages below.
+_YT_VIDEO_PATH = re.compile(r"^/(watch|live/[\w-]+|embed/[\w-]+)$")
 
 
 def _validate_youtube_url(url: str) -> tuple[bool, str | None]:
     """
     Returns (is_valid, reject_reason). Lightweight format check only —
-    authoritative validation happens in the worker via yt-dlp.
+    authoritative validation (including is_live) happens in the worker
+    via yt-dlp.
     """
     try:
         u = urlparse(url.strip())
@@ -62,9 +68,17 @@ def _validate_youtube_url(url: str) -> tuple[bool, str | None]:
         return False, "URL is not a YouTube URL"
 
     path = u.path or "/"
-    # Basic livestream guard — full check happens in M3 via yt-dlp.
-    if "/live/" in path:
-        return False, "Livestreams are not supported"
+    query = u.query or ""
+
+    # Playlists: dedicated path or any URL carrying a list= parameter.
+    if path == "/playlist" or path.startswith("/playlist/"):
+        return False, "Playlist URLs are not supported. Please use a single video URL."
+    if "list=" in query:
+        return False, "Playlist URLs are not supported. Please use a single video URL."
+
+    # YouTube Shorts.
+    if path == "/shorts" or path.startswith("/shorts/"):
+        return False, "YouTube Shorts are not supported"
 
     if host == "youtu.be":
         # youtu.be/<video_id>
@@ -72,10 +86,13 @@ def _validate_youtube_url(url: str) -> tuple[bool, str | None]:
             return False, "Missing video id in URL"
         return True, None
 
-    # youtube.com — must have a known video path with an `?v=` param for /watch
-    if _YT_WATCH_PATH.match(path):
+    # youtube.com / m.youtube.com / music.youtube.com — accept /watch,
+    # /live/<id>, /embed/<id>. The /live/ form includes completed
+    # past livestreams (allowed); the live-RIGHT-NOW case is rejected
+    # later by the worker after yt-dlp tells us is_live=True.
+    if _YT_VIDEO_PATH.match(path):
         if path == "/watch":
-            qs = dict([kv.split("=", 1) for kv in u.query.split("&") if "=" in kv])
+            qs = dict([kv.split("=", 1) for kv in query.split("&") if "=" in kv])
             if not qs.get("v"):
                 return False, "Missing video id (?v=) in URL"
         return True, None

@@ -105,3 +105,17 @@ def r2_key_snippet(job_id: str, speaker_label: str) -> str:
 def r2_key_final_video(job_id: str) -> str:
     """Final stitched video of only the selected speaker."""
     return f"jobs/{job_id}/final.mp4"
+
+
+# ---------------------------------------------------------------------------
+# User-facing error messages shared between API and Worker
+# ---------------------------------------------------------------------------
+
+# Returned by the M3 worker (and any future code path) when yt-dlp's
+# metadata reports is_live=True for the supplied URL. URL-pattern-based
+# livestream detection is NOT used — see worker/tasks/dummy.py for the
+# rationale.
+LIVE_STREAM_REJECT_MESSAGE = (
+    "This video is currently live. "
+    "Please wait until the stream ends and try again."
+)

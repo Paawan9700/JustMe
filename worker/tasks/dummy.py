@@ -6,6 +6,19 @@ can be developed end-to-end without the GPU dependencies. They will be
 replaced by real tasks (yt-dlp ingest, ffmpeg audio, WhisperX +
 pyannote diarization, snippet generation, ffmpeg render) in M3-M6.
 
+Real livestream detection happens in M3 via yt-dlp metadata.
+We check the 'is_live' field from yt-dlp's info extraction:
+  - is_live == True  -> stream is happening RIGHT NOW   -> reject
+  - is_live == False OR was_live == True -> completed recording -> allow
+Do NOT detect livestreams from URL patterns - they are unreliable
+(e.g. completed past livestreams keep the /live/<id> URL form).
+
+When M3 rejects an active livestream, the error message shown to the
+user must be the constant LIVE_STREAM_REJECT_MESSAGE from
+shared/constants.py:
+    "This video is currently live. Please wait until the stream ends
+     and try again."
+
 Tasks registered:
   - process_video(job_id)   - simulates ingest through AWAITING_SELECTION
   - render_video(job_id)    - simulates final render through DONE

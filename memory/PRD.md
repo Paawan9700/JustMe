@@ -232,6 +232,37 @@ Verified (Playwright E2E, full preview URL):
 
 Frontend dependency additions: `react-router-dom@6`. Lint clean.
 
+---
+
+### Bug fix — URL validation (Jan 2026)
+**Issue**: API was rejecting all URLs containing `/live/`, but YouTube uses
+the same `/live/<id>` path for both ongoing AND completed past streams.
+Completed streams are fully downloadable and must be allowed.
+`https://www.youtube.com/live/THcrvo5Dz7M` (a completed past stream) was
+incorrectly returning 400.
+
+**Fix applied to `backend/app/api/jobs.py`**:
+- Removed the blanket `/live/` URL-level rejection.
+- `_YT_VIDEO_PATH` regex now accepts `/watch`, `/live/<id>`, `/embed/<id>`
+  (Shorts removed from the allowed list).
+- Added dedicated rejections for **playlists** (`path == /playlist` OR
+  `list=` present in query string) and **Shorts** (`/shorts/<id>`).
+- True is-live detection is now correctly deferred to M3 via yt-dlp's
+  `is_live` metadata.
+
+**Other touches**:
+- `shared/constants.py` now exports `LIVE_STREAM_REJECT_MESSAGE` for M3
+  to use when yt-dlp reports `is_live=True`:
+  "This video is currently live. Please wait until the stream ends and
+  try again."
+- `worker/tasks/dummy.py` docstring now documents the M3 detection
+  contract (is_live True / False+was_live).
+
+**Verified** (curl): `/live/THcrvo5Dz7M` → 201; Shorts → 400 with new
+message; `/playlist?list=` and `/watch?v=...&list=` → 400 with playlist
+message; `/watch?v=...`, `/embed/...`, `youtu.be/...` all still 201; Vimeo
+still 400 host check.
+
 Deferred (waiting on user to specify the milestone before building):
 
 ## Next Action Items
