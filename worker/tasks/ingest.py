@@ -142,6 +142,16 @@ def download_video(job_id: str, youtube_url: str, job_dir: Path) -> Path:
         "no_warnings": True,
         "noprogress": True,
         "noplaylist": True,
+        # Datacenter IPs (Modal/RunPod/AWS) trigger YouTube's bot challenge
+        # even with valid cookies. Forcing the TV-embedded and mobile-web
+        # player clients (instead of the default `web` client) often
+        # bypasses the check because those endpoints accept signed cookies
+        # without a PO-Token. Order matters: yt-dlp tries each in turn.
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["tv_embedded", "mweb", "web"],
+            }
+        },
     }
     _maybe_add_cookies(ydl_opts)
 
@@ -265,6 +275,13 @@ def _extract_info(youtube_url: str) -> dict[str, Any]:
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
+        # Same datacenter-IP bypass as the download path — see ydl_opts in
+        # download_video() for why these clients are preferred.
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["tv_embedded", "mweb", "web"],
+            }
+        },
     }
     _maybe_add_cookies(ydl_opts)
     try:
