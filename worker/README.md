@@ -98,20 +98,24 @@ worker container at runtime.
 
 ```bash
 modal secret create justme-secrets \
-  MONGO_URL='mongodb+srv://USER:PASS@cluster.mongodb.net' \
+  MONGO_URL='mongodb+srv://paawansingaldev_db_user:Pass%23%23Mongo%40123@cluster-justme.hkowwnj.mongodb.net/justme?appName=Cluster-justme&retryWrites=true&w=majority' \
   DB_NAME='justme' \
-  REDIS_URL='rediss://default:AAA@host.upstash.io:6379' \
-  R2_ACCESS_KEY_ID='xxxx' \
-  R2_SECRET_ACCESS_KEY='xxxx' \
+  REDIS_URL='rediss://default:gQAAAAAAASi4AAIgcDI5MDVkMzM2N2YyZGI0MjUwYmNmNzJkZDQ1MmFmYTJhNA@giving-muskox-75960.upstash.io:6379' \
+  R2_ACCESS_KEY_ID='3319638a4404a6bf85448e013a14a65c' \
+  R2_SECRET_ACCESS_KEY='8f589a515c68bb587e26df9a7f2a344114bf014122f5110b49b6a561b9c98c5b' \
   R2_BUCKET_NAME='justme-r2bucket' \
-  R2_ENDPOINT_URL='https://ACCOUNTID.r2.cloudflarestorage.com' \
-  HF_TOKEN='hf_xxxx' \
+  R2_ENDPOINT_URL='https://7e2ceff51ed2586cee6ac9ad9cc55b6d.r2.cloudflarestorage.com' \
+  HF_TOKEN='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' \
   MAX_VIDEO_HOURS='15'
 ```
 
-> Note: do **not** include the bucket name at the end of
-> `R2_ENDPOINT_URL` — boto3 takes the bucket as a separate argument
-> on every call.
+> Notes on the values above:
+> - The Mongo password's `#` and `@` are **percent-encoded** (`%23%23` and `%40`)
+>   because they're URI-reserved. Leave them as-is — pymongo decodes them.
+> - The R2 endpoint is the bare account URL, **without** `/justme-r2bucket`
+>   appended.
+> - If any of these secrets ever leak, rotate them in the source provider
+>   AND re-run `modal secret create` to update Modal.
 
 ### 3. Deploy
 
