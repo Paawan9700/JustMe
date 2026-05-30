@@ -27,6 +27,7 @@ Failures raise IngestError with a user-facing message. The caller
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import tempfile
@@ -215,6 +216,20 @@ def _maybe_add_cookies(ydl_opts: dict[str, Any]) -> None:
     cookies_blob = os.environ.get("YOUTUBE_COOKIES", "").strip()
     if not cookies_blob:
         return
+
+    # Modal's secret-manager UI strips newlines from pasted values, which
+    # mangles Netscape-format cookies (each cookie must be on its own
+    # line). Workaround: users can paste a base64-encoded blob instead.
+    # Auto-detect: if there are no newlines AND the blob decodes as UTF-8
+    # text containing tabs, treat it as base64.
+    if "\n" not in cookies_blob:
+        try:
+            decoded = base64.b64decode(cookies_blob, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            decoded = None
+        if decoded and "\t" in decoded:
+            logger.info("ingest: auto-decoded base64 YOUTUBE_COOKIES blob")
+            cookies_blob = decoded
 
     if _COOKIES_FILE_PATH is None:
         # Write to a NamedTemporaryFile with delete=False so the path
