@@ -232,7 +232,13 @@ def _maybe_add_cookies(ydl_opts: dict[str, Any]) -> None:
         finally:
             tmp.close()
         _COOKIES_FILE_PATH = tmp.name
-        logger.info("ingest: wrote YouTube cookies to %s", _COOKIES_FILE_PATH)
+        logger.info(
+            "ingest: wrote YouTube cookies to %s (size=%d bytes, lines=%d, tabs=%d)",
+            _COOKIES_FILE_PATH,
+            len(cookies_blob),
+            cookies_blob.count("\n") + 1,
+            cookies_blob.count("\t"),
+        )
 
     ydl_opts["cookiefile"] = _COOKIES_FILE_PATH
 
