@@ -1,21 +1,30 @@
 import React from "react";
+import { Routes, Route, Link } from "react-router-dom";
+import Home from "./pages/Home";
+import JobStatus from "./pages/JobStatus";
 
 export default function App() {
   return (
-    <main
-      data-testid="m0-placeholder"
-      style={{
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-        padding: "48px",
-        color: "#e5e5e5",
-        background: "#0a0a0a",
-        minHeight: "100vh",
-      }}
-    >
-      <h1 style={{ margin: 0 }}>JustMe</h1>
-      <p style={{ opacity: 0.6, marginTop: 8 }}>
-        Milestone 0: Foundations. UI ships in Milestone 2.
-      </p>
-    </main>
+    <div className="shell" data-testid="app-shell">
+      <header className="shell-top">
+        <Link to="/" className="brand" data-testid="brand-home-link">
+          just<span className="dot">.</span>me
+        </Link>
+        <span className="brand-small">v0.2 — m2</span>
+      </header>
+
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/jobs/:jobId" element={<JobStatus />} />
+        <Route
+          path="*"
+          element={
+            <main data-testid="not-found">
+              <p className="helper-text">Nothing here. <Link to="/">Go home</Link>.</p>
+            </main>
+          }
+        />
+      </Routes>
+    </div>
   );
 }

@@ -171,5 +171,68 @@ Infrastructure:
 Deferred (waiting on user to specify the milestone before building):
 - M2: React UI
 
+---
+
+### M2: Frontend UI — ✅ DONE (Jan 2026)
+Implemented:
+- **Routing** (react-router-dom v6): `/` (Home), `/jobs/:jobId` (JobStatus),
+  `*` (not-found).
+- **API client** (`src/lib/api.js`): thin fetch wrapper around
+  `${REACT_APP_BACKEND_URL}/api/*`, surfaces `detail` from FastAPI as the
+  error message.
+- **Home page** (`src/pages/Home.jsx`):
+    * single URL input + "Get Started" button
+    * client-side disabled state on empty/submitting
+    * server error rendered inline (e.g. "URL is not a YouTube URL",
+      "Livestreams are not supported")
+    * on success: `navigate(/jobs/{job_id})`
+- **JobStatus page** (`src/pages/JobStatus.jsx`):
+    * polls `GET /api/jobs/{id}` every 3s; stops on DONE / FAILED / 404
+    * also triggers an immediate poll right after select-speaker so the
+      UI flips to RENDERING fast, not after up to 3s of latency
+    * five visual states all implemented and verified via Playwright:
+      - **A Processing**: stage tag, human-readable message per
+        `STAGE_MESSAGE` map, animated `<ProgressBar percent>`, dismissable-
+        tab hint
+      - **B Awaiting Selection**: "We found N speakers..." heading, grid
+        of `<SpeakerCard>` (one per speaker, label "Speaker 1" etc.
+        derived from `SPEAKER_00`), audio player when `snippet_url` is
+        present else "No preview available" placeholder, "This is me ✓"
+        button with per-card loading state
+      - **C Rendering**: spinner + "Cutting and stitching..." message
+      - **D Done**: "Your video is ready! 🎉", optional stats
+        ("Extracted X minutes of your speaking from a Y-hour video" —
+        builds gracefully when duration_sec is 0 from dummy worker),
+        Download Video button when `download_url` present else "will
+        appear once the real renderer is wired (M6)" placeholder,
+        "Process another video" link
+      - **E Failed**: error title + `error.message`, "Try Again" button
+        back to `/`
+- **Design**: warm-neutral dark UI with a single amber accent (#d6a35a),
+  monospace brand mark + ui-sans body, generous whitespace, mobile-
+  friendly (single-column layout under 480px). No purple gradients, no
+  generic fonts.
+- **Test IDs**: every interactive element + critical UI element has a
+  unique `data-testid` (per project rules).
+
+Verified (Playwright E2E, full preview URL):
+- Home renders, accepts URL.
+- Invalid URL (`vimeo.com/123`) -> 400 -> red error box on Home.
+- Valid URL -> 201 -> navigates to `/jobs/{id}`.
+- Watched live status walk on dummy worker:
+  QUEUED -> DOWNLOADING -> ... -> AWAITING_SELECTION (2 fake speakers
+  with "Spoke for X minutes, N segments" meta).
+- Clicked "This is me ✓" on SPEAKER_00 -> RENDERING -> DONE
+  (with "Extracted 3 minutes of your speaking" stats; download disabled
+  placeholder because dummy worker leaves final_video_key null).
+- Manually set a job to FAILED in Mongo -> page renders State E with the
+  exact `error.message`.
+- 404 on bogus job id -> State "Job not found" with Back to home button.
+- "Process another video" / "Try Again" / "Back to home" all return to `/`.
+
+Frontend dependency additions: `react-router-dom@6`. Lint clean.
+
+Deferred (waiting on user to specify the milestone before building):
+
 ## Next Action Items
 - Wait for user to send Milestone 1.
