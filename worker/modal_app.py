@@ -58,8 +58,14 @@ image = (
     .run_commands(
         "export DEBIAN_FRONTEND=noninteractive && "
         "apt-get update && "
-        "apt-get install -y --no-install-recommends ffmpeg git tzdata && "
-        "rm -rf /var/lib/apt/lists/*"
+        "apt-get install -y --no-install-recommends git tzdata curl xz-utils && "
+        "rm -rf /var/lib/apt/lists/* && "
+        "curl -sL 'https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz' "
+        "| tar -xJ --strip-components=2 -C /usr/local/bin --wildcards '*/bin/ffmpeg' '*/bin/ffprobe' && "
+        "mkdir -p /opt/conda/bin && "
+        "ln -sf /usr/local/bin/ffmpeg /opt/conda/bin/ffmpeg && "
+        "ln -sf /usr/local/bin/ffprobe /opt/conda/bin/ffprobe && "
+        "ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg"
     )
     .pip_install_from_requirements(str(_REQUIREMENTS))
     .pip_install("git+https://github.com/m-bain/whisperX.git")

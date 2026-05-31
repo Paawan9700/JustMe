@@ -152,11 +152,24 @@ def run_diarization(
     # ---- 5. Speaker diarization (pyannote via whisperx wrapper) ---------
     progress(job_id, percent=60.0, message="Identifying speakers...")
     try:
-        diarize_model = whisperx.DiarizationPipeline(
-            use_auth_token=hf_token, device=device,
+        DiarizationPipeline = (
+            whisperx.DiarizationPipeline
+            if hasattr(whisperx, "DiarizationPipeline")
+            else whisperx.diarize.DiarizationPipeline
         )
+        try:
+            diarize_model = DiarizationPipeline(use_auth_token=hf_token, device=device)
+        except TypeError:
+            diarize_model = DiarizationPipeline(token=hf_token, device=device)
         diarize_segments = diarize_model(audio)
-        result = whisperx.assign_word_speakers(diarize_segments, result)
+        assign_fn = (
+            whisperx.assign_word_speakers
+            if hasattr(whisperx, "assign_word_speakers")
+            else whisperx.diarize.assign_word_speakers
+        )
+        result = assign_fn(diarize_segments, result)
+        _free(diarize_model, torch=torch, device=device)
+        del diarize_segments
     except Exception as exc:  # noqa: BLE001
         # Common case: HF token doesn't have model access yet.
         msg = str(exc).lower()
@@ -218,6 +231,17 @@ def run_diarization(
         local_audio.unlink()
     except OSError:
         pass
+
+    # Full GPU memory purge so the next job starts with a clean slate.
+    # Without this, CUDA memory from this job's models stays allocated
+    # until Python's GC runs, which can OOM the second job.
+    import gc
+    gc.collect()
+    if device == "cuda":
+        try:
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
 
     return speakers_doc
 

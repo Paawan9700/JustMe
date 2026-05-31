@@ -143,16 +143,17 @@ def download_video(job_id: str, youtube_url: str, job_dir: Path) -> Path:
         "noprogress": True,
         "noplaylist": True,
         # Datacenter IPs (Modal/RunPod/AWS) trigger YouTube's bot challenge
-        # even with valid cookies. Forcing the TV-embedded and mobile-web
-        # player clients (instead of the default `web` client) often
-        # bypasses the check because those endpoints accept signed cookies
-        # without a PO-Token. Order matters: yt-dlp tries each in turn.
+        # even with valid cookies. The ios/android clients hit YouTube's
+        # mobile app API which bypasses bot detection without needing a
+        # PO-Token. tv_embedded/mweb/web are kept as fallbacks.
+        # Order matters: yt-dlp tries each in turn.
         "extractor_args": {
             "youtube": {
-                "player_client": ["tv_embedded", "mweb", "web"],
+                "player_client": ["ios", "android", "tv_embedded", "mweb", "web"],
             }
         },
     }
+    _maybe_add_proxy(ydl_opts)
     _maybe_add_cookies(ydl_opts)
 
     try:
@@ -203,6 +204,24 @@ def download_video(job_id: str, youtube_url: str, job_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _maybe_add_proxy(ydl_opts: dict[str, Any]) -> None:
+    """
+    Inject a proxy into yt-dlp options if YOUTUBE_PROXY is set.
+
+    Modal/RunPod run on datacenter IPs that YouTube actively blocks.
+    A residential proxy routes the request through a real home IP,
+    bypassing bot detection entirely.
+
+    Set YOUTUBE_PROXY in your Modal secret to a URL like:
+      http://user:pass@gate.smartproxy.com:10000
+      socks5://user:pass@proxy.brightdata.com:22225
+    """
+    proxy_url = os.environ.get("YOUTUBE_PROXY", "").strip()
+    if proxy_url:
+        ydl_opts["proxy"] = proxy_url
+        logger.info("ingest: using proxy %s", proxy_url.split("@")[-1])
+
 
 def _maybe_add_cookies(ydl_opts: dict[str, Any]) -> None:
     """
@@ -279,10 +298,11 @@ def _extract_info(youtube_url: str) -> dict[str, Any]:
         # download_video() for why these clients are preferred.
         "extractor_args": {
             "youtube": {
-                "player_client": ["tv_embedded", "mweb", "web"],
+                "player_client": ["ios", "android", "tv_embedded", "mweb", "web"],
             }
         },
     }
+    _maybe_add_proxy(ydl_opts)
     _maybe_add_cookies(ydl_opts)
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -300,7 +320,7 @@ def _map_ytdlp_error(msg: str) -> tuple[str, str]:
         return "MEMBERS_ONLY", "This video is for channel members only."
     if "age" in lower and "confirm" in lower:
         return "AGE_RESTRICTED", "This video is age-restricted."
-    if "unavailable" in lower or "has been removed" in lower or "removed by the user" in lower:
+    if "unavailable" in lower or "has been removed" in lower or "removed by the user" in lower or "isn't available" in lower or "is not available" in lower:
         return "UNAVAILABLE", "This video is unavailable or has been removed."
     if "copyright" in lower:
         return "COPYRIGHT", "This video is blocked for copyright reasons."
