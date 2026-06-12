@@ -5,3 +5,25 @@ credentials.json
 *.pem
 *.key
 .credentials
+.claude
+*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+frontend/build/
+
+# OS
+.DS_Store
+
+# Codegraph (local index, machine-specific)
+.codegraph/

@@ -5,8 +5,7 @@ HTTP endpoints for job lifecycle:
     GET  /api/jobs/{job_id}                 - read job + hydrated URLs
     POST /api/jobs/{job_id}/select-speaker  - user picks their voice
 
-All routes are mounted under /api so they're reachable through Emergent's
-ingress.
+All routes are mounted under /api 
 """
 
 from __future__ import annotations
