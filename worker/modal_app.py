@@ -67,6 +67,22 @@ image = (
         "ln -sf /usr/local/bin/ffprobe /opt/conda/bin/ffprobe && "
         "ln -sf /usr/local/bin/ffmpeg /usr/bin/ffmpeg"
     )
+    # Deno: yt-dlp needs a JavaScript runtime to solve YouTube's "n" signature
+    # challenge. Without it yt-dlp logs "n challenge solving failed: Some
+    # formats may be missing" and can drop formats or get throttled. Installing
+    # the deno binary onto PATH makes yt-dlp's deno JS Challenge Provider
+    # available (it auto-detects `deno` on PATH).
+    .run_commands(
+        "export DEBIAN_FRONTEND=noninteractive && "
+        "apt-get update && apt-get install -y --no-install-recommends unzip && "
+        "rm -rf /var/lib/apt/lists/* && "
+        "curl -fsSL 'https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip' "
+        "-o /tmp/deno.zip && "
+        "unzip /tmp/deno.zip -d /usr/local/bin && "
+        "chmod +x /usr/local/bin/deno && "
+        "rm /tmp/deno.zip && "
+        "deno --version"
+    )
     .pip_install_from_requirements(str(_REQUIREMENTS))
     .pip_install("git+https://github.com/m-bain/whisperX.git")
     # Bake the worker + shared packages into the image. Modal needs the
@@ -92,7 +108,7 @@ app = modal.App("justme-worker", image=image)
     # Celery in worker/celery_app.py.
     timeout=86400,
     retries=modal.Retries(max_retries=10, backoff_coefficient=1.0, initial_delay=5.0),
-    min_containers=1,      # keep one warm container so cold-starts don't add latency
+    min_containers=0,      # scale to zero when idle — re-enable for production to avoid cold starts
     # @modal.concurrent=1,  # one Modal invocation; celery handles in-process concurrency
 )
 def run_worker() -> None:

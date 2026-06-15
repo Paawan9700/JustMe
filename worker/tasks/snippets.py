@@ -1,7 +1,7 @@
 """
 Per-speaker identification snippets.
 
-For each diarized speaker we cut a 6-second mp3 from the middle of
+For each diarized speaker we cut a 10-second mp3 from the middle of
 their longest segment, upload it to R2, and stamp the resulting key
 onto `job.speakers[].snippet_key`. The frontend then plays these
 clips on the AWAITING_SELECTION screen so the user can pick their
@@ -16,7 +16,7 @@ Pipeline:
      frontend already handles that with "No preview available".
   4. Download source.mp4 from R2 to job_dir if not already there.
   5. For each speaker: pick longest segment from `segments`, cut a
-     6-second window centred on its midpoint, ffmpeg -> mp3 @ 128k,
+     10-second window centred on its midpoint, ffmpeg -> mp3 @ 128k,
      upload to R2, set `speakers.$.snippet_key`. Per-speaker errors
      are logged and skipped (other speakers' clips still ship).
   6. Delete the local source video (M6 will re-download for render).
@@ -39,7 +39,7 @@ from shared.constants import JobStatus, r2_key_snippet
 
 logger = logging.getLogger(__name__)
 
-SNIPPET_LENGTH_SEC = 6.0  # spec: 6-second clip
+SNIPPET_LENGTH_SEC = 10.0  # identification clip length
 SNIPPET_HALF = SNIPPET_LENGTH_SEC / 2.0
 
 
@@ -221,6 +221,14 @@ def _make_one_snippet(
 
     if not local_mp3.exists() or local_mp3.stat().st_size == 0:
         raise RuntimeError(f"ffmpeg produced no output for {speaker_label}")
+
+    # Verification log: confirm the clip window and produced file size.
+    # Lets us check in the worker logs that each snippet is the full ~6s.
+    logger.info(
+        "snippets[%s] cut %s: window=%.3f-%.3fs (%.3fs) -> %s (%d bytes)",
+        job_id, speaker_label, snippet_start, snippet_end,
+        snippet_end - snippet_start, local_mp3.name, local_mp3.stat().st_size,
+    )
 
     r2_key = r2_key_snippet(job_id, speaker_label)
     try:

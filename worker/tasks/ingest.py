@@ -131,7 +131,13 @@ def download_video(job_id: str, youtube_url: str, job_dir: Path) -> Path:
             state["last_t"] = now
 
     ydl_opts: dict[str, Any] = {
-        "format": "bestvideo[height<=720]+bestaudio/best[height<=720]",
+        # Capped at 360p on purpose: every media byte flows through the
+        # residential proxy (YouTube binds the signed CDN URL to the proxy
+        # IP, so we can't download direct), and diarization only needs the
+        # audio — video is just for the final cut. All fallbacks are also
+        # height-capped so a job can never silently pull full-res and blow
+        # the proxy bandwidth budget.
+        "format": "bestvideo[height<=360]+bestaudio/best[height<=360]/best",
         "outtmpl": out_template,
         "merge_output_format": "mp4",
         "continue_dl": True,
@@ -142,14 +148,15 @@ def download_video(job_id: str, youtube_url: str, job_dir: Path) -> Path:
         "no_warnings": True,
         "noprogress": True,
         "noplaylist": True,
-        # Datacenter IPs (Modal/RunPod/AWS) trigger YouTube's bot challenge
-        # even with valid cookies. The ios/android clients hit YouTube's
-        # mobile app API which bypasses bot detection without needing a
-        # PO-Token. tv_embedded/mweb/web are kept as fallbacks.
-        # Order matters: yt-dlp tries each in turn.
+        # YouTube (late-2025/2026) forces SABR + PO Tokens. Clients that
+        # require a PO Token (ios/android/mweb/web/...) return only
+        # storyboard images on datacenter IPs -> "Requested format is not
+        # available". The clients below do NOT need a PO Token and still
+        # return real media when cookies are attached. Order matters:
+        # yt-dlp tries each in turn.
         "extractor_args": {
             "youtube": {
-                "player_client": ["ios", "android", "tv_embedded", "mweb", "web"],
+                "player_client": ["tv", "web_embedded", "android_vr"],
             }
         },
     }
@@ -294,16 +301,17 @@ def _extract_info(youtube_url: str) -> dict[str, Any]:
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
-        # Same datacenter-IP bypass as the download path — see ydl_opts in
+        # Same no-PO-Token clients as the download path — see ydl_opts in
         # download_video() for why these clients are preferred.
         "extractor_args": {
             "youtube": {
-                "player_client": ["ios", "android", "tv_embedded", "mweb", "web"],
+                "player_client": ["tv", "web_embedded", "android_vr"],
             }
         },
     }
     _maybe_add_proxy(ydl_opts)
     _maybe_add_cookies(ydl_opts)
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(youtube_url, download=False)
@@ -320,6 +328,8 @@ def _map_ytdlp_error(msg: str) -> tuple[str, str]:
         return "MEMBERS_ONLY", "This video is for channel members only."
     if "age" in lower and "confirm" in lower:
         return "AGE_RESTRICTED", "This video is age-restricted."
+    if "requested format is not available" in lower:
+        return "DOWNLOAD_FAILED", "Could not download video: no suitable format found. Try a different video."
     if "unavailable" in lower or "has been removed" in lower or "removed by the user" in lower or "isn't available" in lower or "is not available" in lower:
         return "UNAVAILABLE", "This video is unavailable or has been removed."
     if "copyright" in lower:
@@ -328,3 +338,5 @@ def _map_ytdlp_error(msg: str) -> tuple[str, str]:
         return "REGION_BLOCKED", "This video is not available in our region."
     # Fallback — keep the raw message short for the user.
     return "DOWNLOAD_FAILED", f"Could not download video: {msg[:200]}"
+
+

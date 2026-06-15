@@ -121,7 +121,14 @@ async def get_job_hydrated(job_id: str) -> dict[str, Any] | None:
     for sp in doc.get("speakers", []) or []:
         snippet_url = None
         if show_snippets and sp.get("snippet_key"):
-            snippet_url = storage.get_presigned_url(sp["snippet_key"])
+            # Force audio/mpeg + inline so HTML5 <audio> can stream/seek the
+            # clip. Without this, objects served as binary/octet-stream stall
+            # after ~1s in the browser.
+            snippet_url = storage.get_presigned_url(
+                sp["snippet_key"],
+                response_content_type="audio/mpeg",
+                inline=True,
+            )
         speakers_out.append(
             {
                 "label": sp.get("label"),
@@ -135,7 +142,10 @@ async def get_job_hydrated(job_id: str) -> dict[str, Any] | None:
     download_url = None
     final_key = (doc.get("artifacts") or {}).get("final_video_key")
     if status == JobStatus.DONE.value and final_key:
-        download_url = storage.get_presigned_url(final_key)
+        download_url = storage.get_presigned_url(
+            final_key,
+            response_content_type="video/mp4",
+        )
     doc["download_url"] = download_url
 
     return doc

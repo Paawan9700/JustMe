@@ -27,8 +27,14 @@ export default function JobStatus() {
   const [selecting, setSelecting] = useState(null); // label currently being selected
   const [selectError, setSelectError] = useState(null);
   const timerRef = useRef(null);
+  const tickRef = useRef(null);
 
   // ---- polling loop -----------------------------------------------------
+  // We stop polling on AWAITING_SELECTION (in addition to DONE/FAILED):
+  // nothing changes there until the user picks a speaker, so polling would
+  // just churn the network — every tick mints a NEW presigned snippet URL
+  // server-side and re-renders the cards. onSelectSpeaker restarts polling
+  // once the user acts (the job moves to RENDERING).
   useEffect(() => {
     let cancelled = false;
 
@@ -38,7 +44,11 @@ export default function JobStatus() {
         if (cancelled) return;
         setJob(data);
         setLoadError(null);
-        if (data.status === "DONE" || data.status === "FAILED") {
+        if (
+          data.status === "AWAITING_SELECTION" ||
+          data.status === "DONE" ||
+          data.status === "FAILED"
+        ) {
           if (timerRef.current) {
             clearInterval(timerRef.current);
             timerRef.current = null;
@@ -54,6 +64,7 @@ export default function JobStatus() {
       }
     }
 
+    tickRef.current = tick;
     tick();
     timerRef.current = setInterval(tick, POLL_MS);
     return () => {
@@ -75,6 +86,11 @@ export default function JobStatus() {
         const data = await getJob(jobId);
         setJob(data);
       } catch { /* polling will catch up */ }
+      // Polling was stopped when we entered AWAITING_SELECTION. The job is
+      // now RENDERING, so resume it to track render -> DONE.
+      if (!timerRef.current && tickRef.current) {
+        timerRef.current = setInterval(tickRef.current, POLL_MS);
+      }
     } catch (err) {
       setSelectError(err.message || "Failed to select speaker");
       setSelecting(null);

@@ -19,12 +19,36 @@ the canonical, retry-safe mechanism for this.
 
 from __future__ import annotations
 
+import logging
+import mimetypes
 import os
 from functools import lru_cache
 
 import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
+
+logger = logging.getLogger(__name__)
+
+# Explicit content types for the artifacts we produce. boto3's upload_file
+# does NOT sniff content type — it defaults to binary/octet-stream, which
+# breaks HTML5 <audio>/<video> streaming (the browser can't tell it's
+# seekable media, so playback stalls after ~1s). Map by extension.
+_CONTENT_TYPES = {
+    ".mp3": "audio/mpeg",
+    ".mp4": "video/mp4",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".webm": "video/webm",
+}
+
+
+def _guess_content_type(local_path: str) -> str:
+    _, ext = os.path.splitext(local_path.lower())
+    if ext in _CONTENT_TYPES:
+        return _CONTENT_TYPES[ext]
+    guessed, _ = mimetypes.guess_type(local_path)
+    return guessed or "application/octet-stream"
 
 
 def _bucket() -> str:
@@ -44,7 +68,17 @@ def _client():
 
 
 def upload_file(local_path: str, r2_key: str) -> None:
-    _client().upload_file(local_path, _bucket(), r2_key)
+    content_type = _guess_content_type(local_path)
+    _client().upload_file(
+        local_path,
+        _bucket(),
+        r2_key,
+        ExtraArgs={"ContentType": content_type},
+    )
+    logger.info(
+        "storage: uploaded %s -> %s (Content-Type=%s)",
+        local_path, r2_key, content_type,
+    )
 
 
 def download_file(r2_key: str, local_path: str) -> None:

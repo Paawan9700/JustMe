@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useRef } from "react";
 
 /**
  * One speaker option in the AWAITING_SELECTION state.
@@ -20,6 +20,21 @@ export default function SpeakerCard({
   const { label, total_speaking_sec, segment_count, snippet_url } = speaker;
   const meta = formatSpeakingMeta(total_speaking_sec, segment_count);
 
+  // Freeze the FIRST non-null snippet URL we ever receive and keep using it.
+  //
+  // JobStatus polls /api/jobs every 3s and the backend mints a brand-new
+  // presigned URL on every response (fresh signature/expiry). Without this
+  // freeze, the `snippet_url` string changes on each poll, React updates
+  // <audio src>, and the browser tears down + reloads the element — which
+  // resets playback. That was the "plays only 1-2s then stops" bug: audio
+  // played until the next 3s poll swapped the src. The presigned URL is
+  // valid for 1h, so reusing the first one is safe for the whole selection.
+  const frozenSrcRef = useRef(null);
+  if (snippet_url && !frozenSrcRef.current) {
+    frozenSrcRef.current = snippet_url;
+  }
+  const audioSrc = frozenSrcRef.current;
+
   return (
     <div
       className={`speaker-card ${isSelecting ? "is-selecting" : ""}`}
@@ -35,11 +50,11 @@ export default function SpeakerCard({
       </div>
 
       <div className="audio-player">
-        {snippet_url ? (
+        {audioSrc ? (
           <audio
             controls
-            preload="none"
-            src={snippet_url}
+            preload="metadata"
+            src={audioSrc}
             data-testid={`speaker-audio-${label}`}
           />
         ) : (
