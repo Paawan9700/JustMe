@@ -1,8 +1,10 @@
 """
 Per-speaker identification snippets.
 
-For each diarized speaker we cut a 10-second mp3 from the middle of
-their longest segment, upload it to R2, and stamp the resulting key
+For each diarized speaker we cut an up-to-20-second mp3 from their
+longest segment (clamped to the segment's own boundaries so it never
+bleeds into surrounding music/silence), upload it to R2, and stamp
+the resulting key
 onto `job.speakers[].snippet_key`. The frontend then plays these
 clips on the AWAITING_SELECTION screen so the user can pick their
 own voice.
@@ -16,7 +18,9 @@ Pipeline:
      frontend already handles that with "No preview available".
   4. Download source.mp4 from R2 to job_dir if not already there.
   5. For each speaker: pick longest segment from `segments`, cut a
-     10-second window centred on its midpoint, ffmpeg -> mp3 @ 128k,
+     window of up to SNIPPET_LENGTH_SEC clamped inside that segment
+     (centred on its midpoint when the segment is long enough, else
+     the whole segment), ffmpeg -> mp3 @ 128k,
      upload to R2, set `speakers.$.snippet_key`. Per-speaker errors
      are logged and skipped (other speakers' clips still ship).
   6. Delete the local source video (M6 will re-download for render).
@@ -39,7 +43,7 @@ from shared.constants import JobStatus, r2_key_snippet
 
 logger = logging.getLogger(__name__)
 
-SNIPPET_LENGTH_SEC = 10.0  # identification clip length
+SNIPPET_LENGTH_SEC = 20.0  # identification clip length (target)
 SNIPPET_HALF = SNIPPET_LENGTH_SEC / 2.0
 
 
@@ -196,9 +200,27 @@ def _make_one_snippet(
 
     start = float(longest["start"])
     end = float(longest["end"])
-    mid = (start + end) / 2.0
-    snippet_start = max(0.0, mid - SNIPPET_HALF)
-    snippet_end = snippet_start + SNIPPET_LENGTH_SEC
+    seg_len = end - start
+
+    # Clamp the snippet window to the chosen segment's own boundaries so it
+    # never bleeds into surrounding audio (intro music, jingles, silence,
+    # another speaker). Bleed was the cause of "music for the first few
+    # seconds, then someone speaks" on cards whose longest segment is short.
+    if seg_len >= SNIPPET_LENGTH_SEC:
+        # Segment is long enough: take a centered SNIPPET_LENGTH_SEC window
+        # from inside it. Centering on the midpoint keeps it within [start, end]
+        # because seg_len >= SNIPPET_LENGTH_SEC.
+        mid = (start + end) / 2.0
+        snippet_start = mid - SNIPPET_HALF
+        snippet_end = mid + SNIPPET_HALF
+    else:
+        # Segment shorter than target: use the whole segment. A clean clip of
+        # pure speech beats a longer one padded with non-speech audio.
+        snippet_start = start
+        snippet_end = end
+
+    # Final safety clamp to the video bounds.
+    snippet_start = max(0.0, snippet_start)
     if duration_sec > 0:
         snippet_end = min(snippet_end, duration_sec)
 
@@ -223,7 +245,8 @@ def _make_one_snippet(
         raise RuntimeError(f"ffmpeg produced no output for {speaker_label}")
 
     # Verification log: confirm the clip window and produced file size.
-    # Lets us check in the worker logs that each snippet is the full ~6s.
+    # Lets us check in the worker logs the actual snippet length per speaker
+    # (up to SNIPPET_LENGTH_SEC; shorter when the segment itself is shorter).
     logger.info(
         "snippets[%s] cut %s: window=%.3f-%.3fs (%.3fs) -> %s (%d bytes)",
         job_id, speaker_label, snippet_start, snippet_end,

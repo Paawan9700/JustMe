@@ -49,6 +49,23 @@ logger = logging.getLogger(__name__)
 
 FINAL_MERGE_GAP_SEC = 2.0  # spec step 3b
 
+# Extra padding applied at RENDER time (on top of diarize.py PAD_SEC) so
+# leading/trailing words aren't clipped at cut boundaries. Applied here
+# rather than in diarize.py so existing jobs can be fixed with a cheap
+# re-render instead of a full GPU re-diarization. Any overlaps these pads
+# create between adjacent kept segments are absorbed by final_merge_pass.
+RENDER_START_PAD_SEC = 0.50  # lead-in so word onsets aren't clipped
+RENDER_END_PAD_SEC = 1.00    # larger tail — trailing syllables were getting cut
+
+# Gap-aware bridging: when two of the selected speaker's segments are
+# separated by a gap that NO other speaker occupies, that gap is almost
+# always the speaker's own speech that diarization failed to assign (a
+# "no-speaker" drop) — so we bridge it back in. Gaps that another speaker
+# occupies are genuine turn-taking and are left cut.
+MAX_BRIDGE_SEC = 20.0             # only bridge clear gaps up to this length
+BRIDGE_OTHER_TOLERANCE_SEC = 0.5  # gap counts as "clear" if <= this much
+                                  # other-speaker audio falls inside it
+
 
 class RenderError(Exception):
     """User-facing render failure with an error code."""
@@ -74,10 +91,11 @@ def run_render(job_id: str, job_dir: Path) -> None:
     db = get_db()
     job = db.jobs.find_one(
         {"job_id": job_id},
-        {"selected_speaker": 1, "artifacts": 1, "_id": 0},
+        {"selected_speaker": 1, "artifacts": 1, "duration_sec": 1, "_id": 0},
     ) or {}
     selected = job.get("selected_speaker")
     source_key = (job.get("artifacts") or {}).get("source_video_key")
+    duration_sec = float(job.get("duration_sec") or 0.0)
 
     if not selected:
         raise RenderError(
@@ -85,11 +103,16 @@ def run_render(job_id: str, job_dir: Path) -> None:
             "No speaker has been selected for this job.",
         )
 
-    raw_segments = list(
+    # Load ALL speakers' segments — we need the other speakers' timing to
+    # decide which gaps inside the selected speaker are "clear" (bridgeable)
+    # versus genuine turn-taking (leave cut).
+    all_segments = list(
         db.segments
-          .find({"job_id": job_id, "speaker": selected}, {"_id": 0, "start": 1, "end": 1})
+          .find({"job_id": job_id}, {"_id": 0, "start": 1, "end": 1, "speaker": 1})
           .sort("start", 1)
     )
+    raw_segments = [s for s in all_segments if s.get("speaker") == selected]
+    other_segments = [s for s in all_segments if s.get("speaker") != selected]
 
     # ---- Skip path (dev fallback) ----------------------------------------
     if not source_key or not raw_segments:
@@ -106,7 +129,34 @@ def run_render(job_id: str, job_dir: Path) -> None:
         return
 
     # ---- Hot path --------------------------------------------------------
-    cut_list = final_merge_pass(raw_segments, FINAL_MERGE_GAP_SEC)
+    # Pad each segment (clamped to the video bounds) before merging so
+    # leading/trailing words survive the cut; final_merge_pass then absorbs
+    # any overlaps the padding introduces between adjacent kept segments.
+    padded = apply_render_padding(
+        raw_segments,
+        start_pad=RENDER_START_PAD_SEC,
+        end_pad=RENDER_END_PAD_SEC,
+        duration_sec=duration_sec,
+    )
+    merged = final_merge_pass(padded, FINAL_MERGE_GAP_SEC)
+    # Bridge clear (no-other-speaker) gaps to recover dropped solo speech.
+    cut_list = bridge_clear_gaps(
+        merged,
+        other_segments,
+        max_bridge_sec=MAX_BRIDGE_SEC,
+        other_tolerance_sec=BRIDGE_OTHER_TOLERANCE_SEC,
+    )
+    bridged = len(merged) - len(cut_list)
+    if bridged > 0:
+        recovered = (
+            sum(s["end"] - s["start"] for s in cut_list)
+            - sum(s["end"] - s["start"] for s in merged)
+        )
+        logger.info(
+            "render[%s] bridged %d clear gap(s), recovering %.1fs of "
+            "likely-dropped solo speech",
+            job_id, bridged, recovered,
+        )
     if not cut_list:
         # Mostly unreachable (we already checked raw_segments was non-empty)
         raise RenderError(
@@ -209,9 +259,7 @@ def run_render(job_id: str, job_dir: Path) -> None:
     )
 
     total_dur = sum(s["end"] - s["start"] for s in cut_list)
-    video_duration = (db.jobs.find_one(
-        {"job_id": job_id}, {"duration_sec": 1, "_id": 0},
-    ) or {}).get("duration_sec") or 0
+    video_duration = duration_sec
     try:
         final_size_mb = final_path.stat().st_size / 1_000_000.0
     except OSError:
@@ -239,6 +287,81 @@ def run_render(job_id: str, job_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Pure helper (testable without ffmpeg / R2)
 # ---------------------------------------------------------------------------
+
+def apply_render_padding(
+    segments: list[dict[str, Any]],
+    start_pad: float = RENDER_START_PAD_SEC,
+    end_pad: float = RENDER_END_PAD_SEC,
+    duration_sec: float | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Widen each segment by `start_pad`/`end_pad` seconds, clamped to
+    [0, duration_sec]. Pure function, no I/O.
+
+    Run before `final_merge_pass` so any overlaps the padding creates
+    between adjacent kept segments get merged away rather than producing
+    duplicated/overlapping cuts.
+    """
+    upper = float(duration_sec) if duration_sec else float("inf")
+    out: list[dict[str, Any]] = []
+    for s in segments:
+        start = max(0.0, float(s["start"]) - start_pad)
+        end = min(upper, float(s["end"]) + end_pad)
+        if end > start:
+            out.append({"start": start, "end": end})
+    return out
+
+
+def bridge_clear_gaps(
+    segments: list[dict[str, Any]],
+    other_segments: list[dict[str, Any]],
+    max_bridge_sec: float = MAX_BRIDGE_SEC,
+    other_tolerance_sec: float = BRIDGE_OTHER_TOLERANCE_SEC,
+) -> list[dict[str, Any]]:
+    """
+    Merge across gaps between selected-speaker segments when the gap is
+    short (<= max_bridge_sec) AND essentially unoccupied by any other
+    speaker (<= other_tolerance_sec of overlap). Pure function, no I/O.
+
+    Rationale: a gap inside one speaker's timeline that no other speaker
+    fills is almost always that speaker's own speech which diarization
+    failed to assign (dropped as "no-speaker"). Bridging restores it.
+    Gaps an other speaker occupies are real turn-taking and stay cut.
+
+    `segments` must be sorted by start (caller passes final_merge_pass
+    output). Returns a new list of {start, end} dicts.
+    """
+    if not segments:
+        return []
+
+    out: list[dict[str, Any]] = [
+        {"start": float(segments[0]["start"]), "end": float(segments[0]["end"])}
+    ]
+    for s in segments[1:]:
+        start = float(s["start"])
+        end = float(s["end"])
+        gap0 = out[-1]["end"]
+        gap_len = start - gap0
+
+        if gap_len <= 0:
+            # Already overlapping/adjacent — just extend.
+            out[-1]["end"] = max(out[-1]["end"], end)
+            continue
+
+        # How much of the gap (gap0 -> start) does any other speaker occupy?
+        other_overlap = 0.0
+        for o in other_segments:
+            ov = min(start, float(o["end"])) - max(gap0, float(o["start"]))
+            if ov > 0:
+                other_overlap += ov
+
+        if gap_len <= max_bridge_sec and other_overlap <= other_tolerance_sec:
+            # Clear gap — bridge it (swallow the gap into the current cut).
+            out[-1]["end"] = max(out[-1]["end"], end)
+        else:
+            out.append({"start": start, "end": end})
+    return out
+
 
 def final_merge_pass(
     segments: list[dict[str, Any]],

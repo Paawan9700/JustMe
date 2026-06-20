@@ -54,7 +54,8 @@ class DiarizationError(Exception):
 # tests and dashboards. Values come from the M4 spec.
 MERGE_GAP_SEC = 1.5    # merge adjacent same-speaker segments closer than this
 MIN_SEGMENT_SEC = 0.5  # drop segments shorter than this
-PAD_SEC = 0.25         # pad each segment start/end by this many seconds
+PAD_SEC = 0.5          # pad each segment start/end by this many seconds
+                       # (render.py adds further padding at cut time)
 
 
 # ---------------------------------------------------------------------------
