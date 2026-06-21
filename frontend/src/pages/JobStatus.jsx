@@ -269,6 +269,19 @@ function Done({ job }) {
         </span>
       )}
 
+      {job.transcription_url && (
+        <a
+          className="download-btn"
+          href={job.transcription_url}
+          download
+          target="_blank"
+          rel="noopener noreferrer"
+          data-testid="download-transcript-btn"
+        >
+          Download Transcript
+        </a>
+      )}
+
       <Link to="/" className="ghost-btn" data-testid="process-another-link"
             style={{ alignSelf: "flex-start", textDecoration: "none" }}>
         Process another video

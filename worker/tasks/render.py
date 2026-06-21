@@ -35,6 +35,7 @@ catches and marks the job FAILED.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -43,7 +44,12 @@ from worker.db import get_db
 from worker.state import progress, transition
 from worker.utils.ffmpeg import FFmpegError, detect_silence, run_ffmpeg
 from worker.utils.storage import download_file, upload_file
-from shared.constants import JobStatus, r2_key_final_video
+from shared.constants import (
+    JobStatus,
+    r2_key_final_video,
+    r2_key_transcript,
+    r2_key_transcription,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +327,22 @@ def run_render(job_id: str, job_dir: Path) -> None:
         final_key,
     )
 
+    # 8b. Build the downloadable transcript of the FINAL video.
+    # The video is already uploaded and stamped above, so this is strictly
+    # best-effort: any failure (missing transcript.json on a pre-feature job,
+    # download/upload error) is logged and swallowed — the video still ships.
+    # Selector is window-overlap, NOT speaker: anything audible in the final
+    # video must appear, including no-speaker spans that bridging pulled in.
+    progress(job_id, percent=95.0, message="Building transcript...")
+    try:
+        _build_final_transcript(db, job_id, job_dir, cut_list)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "render[%s] transcript build failed (%s); continuing — the "
+            "video is unaffected, the transcript just won't be available",
+            job_id, exc,
+        )
+
     # 9. Finish
     transition(
         job_id, JobStatus.DONE.value,
@@ -509,3 +531,83 @@ def final_merge_pass(
         else:
             out.append({"start": start, "end": end})
     return out
+
+
+def select_transcript_text(
+    transcript: list[dict[str, Any]],
+    windows: list[dict[str, Any]],
+) -> str:
+    """
+    Join the text of every transcript segment whose audio falls inside any
+    final-video window. Pure function, no I/O.
+
+    `transcript` is the {start, end, speaker, text} list produced at diarize
+    time; `windows` is the render cut list (the segments actually placed in
+    the final video). Selection is by time-overlap, NOT by speaker — anything
+    audible in the final video must be transcribed, which is what upholds the
+    recall guarantee (a few boundary/other-speaker words are acceptable).
+
+    Overlap is half-open (`seg.end > win.start and seg.start < win.end`) so a
+    segment that merely abuts a window edge isn't pulled in. Each segment is
+    emitted at most once even if it spans several windows. Output is ordered
+    by start time and joined with single spaces.
+    """
+    selected: list[dict[str, Any]] = []
+    for seg in transcript:
+        try:
+            s_start = float(seg["start"])
+            s_end = float(seg["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        for w in windows:
+            w_start = float(w["start"])
+            w_end = float(w["end"])
+            if s_end > w_start and s_start < w_end:
+                selected.append(seg)
+                break  # emit this segment once, regardless of how many windows it hits
+
+    selected.sort(key=lambda s: float(s["start"]))
+    parts = [(s.get("text") or "").strip() for s in selected]
+    return " ".join(p for p in parts if p)
+
+
+def _build_final_transcript(
+    db: Any,
+    job_id: str,
+    job_dir: Path,
+    cut_list: list[dict[str, Any]],
+) -> None:
+    """
+    Download the diarize-time transcript.json, select the text overlapping
+    the final cut windows, and upload it as transcription.txt. Stamps
+    `artifacts.transcription_key` on success.
+
+    Raises on any failure — the caller wraps this in best-effort try/except so
+    a missing transcript.json (pre-feature jobs) or an I/O error never fails
+    the render. Writes nothing when there's no overlapping text (so the
+    frontend simply shows no transcript button rather than an empty file).
+    """
+    local_transcript = job_dir / "transcript.json"
+    download_file(r2_key_transcript(job_id), str(local_transcript))
+    transcript = json.loads(local_transcript.read_text(encoding="utf-8"))
+
+    text = select_transcript_text(transcript, cut_list)
+    if not text:
+        logger.info(
+            "render[%s] transcript empty after window selection; skipping upload",
+            job_id,
+        )
+        return
+
+    out_path = job_dir / "transcription.txt"
+    out_path.write_text(text, encoding="utf-8")
+    transcription_key = r2_key_transcription(job_id)
+    upload_file(str(out_path), transcription_key)
+    db.jobs.update_one(
+        {"job_id": job_id},
+        {"$set": {"artifacts.transcription_key": transcription_key}},
+    )
+    logger.info(
+        "render[%s] transcript saved: %d chars -> %s",
+        job_id, len(text), transcription_key,
+    )

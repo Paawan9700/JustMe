@@ -40,6 +40,8 @@ _CONTENT_TYPES = {
     ".wav": "audio/wav",
     ".m4a": "audio/mp4",
     ".webm": "video/webm",
+    ".txt": "text/plain; charset=utf-8",
+    ".json": "application/json",
 }
 
 

@@ -81,6 +81,8 @@ def is_legal_transition(current: str, new: str) -> bool:
 #   jobs/{job_id}/audio.wav
 #   jobs/{job_id}/snippets/{speaker_label}.mp3
 #   jobs/{job_id}/final.mp4
+#   jobs/{job_id}/transcript.json     (structured, all segments — Phase-2 source)
+#   jobs/{job_id}/transcription.txt   (plain-text transcript of the final video)
 # ---------------------------------------------------------------------------
 
 def r2_key_source_video(job_id: str) -> str:
@@ -105,6 +107,23 @@ def r2_key_snippet(job_id: str, speaker_label: str) -> str:
 def r2_key_final_video(job_id: str) -> str:
     """Final stitched video of only the selected speaker."""
     return f"jobs/{job_id}/final.mp4"
+
+
+def r2_key_transcript(job_id: str) -> str:
+    """
+    Structured transcript of the whole source: all WhisperX segments
+    (including no-speaker ones) with {start, end, speaker, text}.
+
+    Written at diarize time as the complete, lossless record of what was
+    said. Source of truth for the render-time plain-text transcript and the
+    fuel for Phase-2 (LLM insights).
+    """
+    return f"jobs/{job_id}/transcript.json"
+
+
+def r2_key_transcription(job_id: str) -> str:
+    """User-facing plain-text transcript of the final rendered video."""
+    return f"jobs/{job_id}/transcription.txt"
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ duration_sec)`. Pure post-processing logic is in
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections import defaultdict
@@ -35,8 +36,8 @@ from typing import Any
 
 from worker.db import get_db
 from worker.state import progress, transition
-from worker.utils.storage import download_file
-from shared.constants import JobStatus
+from worker.utils.storage import download_file, upload_file
+from shared.constants import JobStatus, r2_key_transcript
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,33 @@ def run_diarization(
         {"$set": {"speakers": speakers_doc}},
     )
 
+    # ---- 9b. Persist the FULL transcript for download + Phase-2 ---------
+    # Best-effort: WhisperX already produced this text while transcribing for
+    # diarization, so we just stop discarding it. A failure here must never
+    # fail the job — the video pipeline does not depend on it.
+    try:
+        transcript = build_transcript(result)
+        transcript_path = job_dir / "transcript.json"
+        transcript_path.write_text(
+            json.dumps(transcript, ensure_ascii=False), encoding="utf-8",
+        )
+        transcript_key = r2_key_transcript(job_id)
+        upload_file(str(transcript_path), transcript_key)
+        db.jobs.update_one(
+            {"job_id": job_id},
+            {"$set": {"artifacts.transcript_key": transcript_key}},
+        )
+        logger.info(
+            "diarize[%s] transcript saved: %d segments -> %s",
+            job_id, len(transcript), transcript_key,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "diarize[%s] transcript persist failed (%s); continuing — the "
+            "video is unaffected, the transcript just won't be available",
+            job_id, exc,
+        )
+
     progress(
         job_id, percent=100.0,
         message=(
@@ -250,6 +278,44 @@ def run_diarization(
 # ---------------------------------------------------------------------------
 # Pure helpers (testable without GPU)
 # ---------------------------------------------------------------------------
+
+def build_transcript(whisperx_result: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Build the COMPLETE transcript from whisperx's segment list as
+    {start, end, speaker, text} dicts, sorted by start.
+
+    Unlike `_extract_raw_segments` (which feeds the recall-tuned render
+    pipeline and therefore drops no-speaker segments), this keeps EVERY
+    segment that has real text — including ones pyannote never assigned a
+    speaker to. Those no-speaker spans are exactly what `bridge_clear_gaps`
+    pulls into the final video, so they must be present here for the
+    downstream transcript to satisfy the "never fewer words" guarantee.
+
+    `speaker` may be None when whisperx left the segment unassigned.
+    """
+    out: list[dict[str, Any]] = []
+    for seg in whisperx_result.get("segments", []) or []:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            start = float(seg["start"])
+            end = float(seg["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        out.append(
+            {
+                "start": start,
+                "end": end,
+                "speaker": seg.get("speaker"),  # may be None
+                "text": text,
+            }
+        )
+    out.sort(key=lambda s: s["start"])
+    return out
+
 
 def _extract_raw_segments(whisperx_result: dict[str, Any]) -> list[dict[str, Any]]:
     """Pull (speaker, start, end) tuples out of whisperx's segment list."""

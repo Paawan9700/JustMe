@@ -61,6 +61,8 @@ async def create_job(youtube_url: str) -> dict[str, Any]:
             "source_video_key": None,
             "audio_key": None,
             "final_video_key": None,
+            "transcript_key": None,       # structured transcript.json (Phase-2 source)
+            "transcription_key": None,    # plain-text transcript of the final video
         },
         "speakers": [],
         "selected_speaker": None,
@@ -99,6 +101,8 @@ async def get_job_hydrated(job_id: str) -> dict[str, Any] | None:
         >= AWAITING_SELECTION and the snippet_key exists.
       * inject top-level `download_url` (presigned, 1h) when status == DONE
         and final_video_key exists.
+      * inject top-level `transcription_url` (presigned, 1h) when status ==
+        DONE and transcription_key exists.
 
     Presigned URL generation is sync (boto3), but the underlying call only
     signs locally — no network — so we don't bother offloading to a thread.
@@ -139,14 +143,27 @@ async def get_job_hydrated(job_id: str) -> dict[str, Any] | None:
         )
     doc["speakers"] = speakers_out
 
+    artifacts = doc.get("artifacts") or {}
+
     download_url = None
-    final_key = (doc.get("artifacts") or {}).get("final_video_key")
+    final_key = artifacts.get("final_video_key")
     if status == JobStatus.DONE.value and final_key:
         download_url = storage.get_presigned_url(
             final_key,
             response_content_type="video/mp4",
         )
     doc["download_url"] = download_url
+
+    # Plain-text transcript of the final video. No `inline` — we want the
+    # browser to download it as a file, not render it in a tab.
+    transcription_url = None
+    transcription_key = artifacts.get("transcription_key")
+    if status == JobStatus.DONE.value and transcription_key:
+        transcription_url = storage.get_presigned_url(
+            transcription_key,
+            response_content_type="text/plain; charset=utf-8",
+        )
+    doc["transcription_url"] = transcription_url
 
     return doc
 

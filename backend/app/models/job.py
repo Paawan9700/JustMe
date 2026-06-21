@@ -61,6 +61,7 @@ class JobResponse(BaseModel):
     speakers: list[SpeakerInfoResponse] = []
     selected_speaker: Optional[str] = None
     download_url: Optional[str] = None  # presigned, only when status == DONE
+    transcription_url: Optional[str] = None  # presigned .txt, only when status == DONE
     created_at: datetime
     updated_at: datetime
 
