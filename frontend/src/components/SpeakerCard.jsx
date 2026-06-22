@@ -1,4 +1,6 @@
 import React, { useRef } from "react";
+import { motion } from "framer-motion";
+import { Check, Loader2, AudioLines, Clock, Hash } from "lucide-react";
 
 /**
  * One speaker option in the AWAITING_SELECTION state.
@@ -18,7 +20,7 @@ export default function SpeakerCard({
   disabled,
 }) {
   const { label, total_speaking_sec, segment_count, snippet_url } = speaker;
-  const meta = formatSpeakingMeta(total_speaking_sec, segment_count);
+  const { timeStr, segStr } = formatSpeakingMeta(total_speaking_sec, segment_count);
 
   // Freeze the FIRST non-null snippet URL we ever receive and keep using it.
   //
@@ -36,20 +38,48 @@ export default function SpeakerCard({
   const audioSrc = frozenSrcRef.current;
 
   return (
-    <div
-      className={`speaker-card ${isSelecting ? "is-selecting" : ""}`}
+    <motion.div
+      variants={{
+        hidden: { opacity: 0, y: 18 },
+        show: { opacity: 1, y: 0 },
+      }}
+      className={`glass relative flex flex-col gap-4 p-5 transition-all duration-200 ${
+        isSelecting
+          ? "border-accent/50 shadow-glow-accent"
+          : "hover:border-white/15"
+      } ${disabled && !isSelecting ? "opacity-50" : ""}`}
       data-testid={`speaker-card-${label}`}
     >
-      <div>
-        <p className="speaker-label" data-testid={`speaker-name-${label}`}>
-          {displayName}
-        </p>
-        <p className="speaker-meta" data-testid={`speaker-meta-${label}`}>
-          {meta}
-        </p>
+      <div className="flex items-start justify-between">
+        <div className="flex items-center gap-3">
+          <span className="grid h-10 w-10 place-items-center rounded-xl border border-white/10 bg-white/[0.03] text-accent-soft">
+            <AudioLines className="h-5 w-5" />
+          </span>
+          <div>
+            <p
+              className="text-base font-semibold leading-tight text-white"
+              data-testid={`speaker-name-${label}`}
+            >
+              {displayName}
+            </p>
+            <p
+              className="mt-1 flex items-center gap-3 font-mono text-xs text-slate-500"
+              data-testid={`speaker-meta-${label}`}
+            >
+              <span className="inline-flex items-center gap-1">
+                <Clock className="h-3 w-3" />
+                {timeStr}
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <Hash className="h-3 w-3" />
+                {segStr}
+              </span>
+            </p>
+          </div>
+        </div>
       </div>
 
-      <div className="audio-player">
+      <div className="rounded-xl border border-white/[0.06] bg-ink-950/60 p-2.5">
         {audioSrc ? (
           <audio
             controls
@@ -58,22 +88,37 @@ export default function SpeakerCard({
             data-testid={`speaker-audio-${label}`}
           />
         ) : (
-          <p className="audio-missing" data-testid={`speaker-audio-missing-${label}`}>
+          <p
+            className="rounded-lg border border-dashed border-white/10 px-3 py-2.5 text-center font-mono text-xs text-slate-600"
+            data-testid={`speaker-audio-missing-${label}`}
+          >
             No preview available
           </p>
         )}
       </div>
 
-      <button
+      <motion.button
         type="button"
-        className="primary-btn"
+        whileHover={!disabled && !isSelecting ? { y: -2 } : {}}
+        whileTap={!disabled && !isSelecting ? { scale: 0.98 } : {}}
+        className="btn-primary w-full"
         onClick={() => onSelect(label)}
         disabled={disabled || isSelecting}
         data-testid={`speaker-select-btn-${label}`}
       >
-        {isSelecting ? "Selecting…" : "This is me \u2713"}
-      </button>
-    </div>
+        {isSelecting ? (
+          <>
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Selecting…
+          </>
+        ) : (
+          <>
+            <Check className="h-4 w-4" />
+            This is me
+          </>
+        )}
+      </motion.button>
+    </motion.div>
   );
 }
 
@@ -89,5 +134,5 @@ function formatSpeakingMeta(sec, count) {
   }
   const segments = Number(count) || 0;
   const segStr = `${segments} segment${segments === 1 ? "" : "s"}`;
-  return `Spoke for ${timeStr}, ${segStr}`;
+  return { timeStr, segStr };
 }
