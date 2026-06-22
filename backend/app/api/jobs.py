@@ -14,16 +14,18 @@ import logging
 import re
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 
+from app.core.config import settings
 from app.models.job import (
+    GenerateRecommendationsResponse,
     JobCreateRequest,
     JobCreateResponse,
     JobResponse,
     SelectSpeakerRequest,
     SelectSpeakerResponse,
 )
-from app.services import job_service
+from app.services import job_service, recommendations
 from app.services.queue import enqueue_process_video, enqueue_render_video
 
 logger = logging.getLogger(__name__)
@@ -196,3 +198,44 @@ async def select_speaker(job_id: str, payload: SelectSpeakerRequest) -> SelectSp
 
     job = result["job"]
     return SelectSpeakerResponse(job_id=job["job_id"], status=job["status"])
+
+
+# ---------------------------------------------------------------------------
+# POST /api/jobs/{job_id}/generate-recommendations
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{job_id}/generate-recommendations",
+    response_model=GenerateRecommendationsResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def generate_recommendations(
+    job_id: str, background_tasks: BackgroundTasks
+) -> GenerateRecommendationsResponse:
+    """
+    Kick off LLM extraction of stock recommendations from the job's transcript.
+    Runs as an in-process background task; the client polls GET /api/jobs/{id}
+    and reads `recommendations_status` / `recommendations_url`.
+    """
+    # Fail fast if the feature isn't configured — don't enter GENERATING.
+    if not settings.gemini_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Recommendations are not available — LLM key not configured.",
+        )
+
+    result = await job_service.claim_recommendations_generating(job_id)
+    if not result["ok"]:
+        code = result["error_code"]
+        if code == "NOT_FOUND":
+            raise HTTPException(status_code=404, detail=result["message"])
+        if code == "NO_TRANSCRIPT":
+            raise HTTPException(status_code=422, detail=result["message"])
+        if code in ("WRONG_STATE", "ALREADY_GENERATING"):
+            raise HTTPException(status_code=409, detail=result["message"])
+        raise HTTPException(status_code=500, detail=result["message"])
+
+    background_tasks.add_task(recommendations.generate_for_job, job_id)
+    return GenerateRecommendationsResponse(
+        job_id=job_id, recommendations_status="GENERATING"
+    )

@@ -83,6 +83,7 @@ def is_legal_transition(current: str, new: str) -> bool:
 #   jobs/{job_id}/final.mp4
 #   jobs/{job_id}/transcript.json     (structured, all segments — Phase-2 source)
 #   jobs/{job_id}/transcription.txt   (plain-text transcript of the final video)
+#   jobs/{job_id}/recommendations.csv (LLM-extracted stock recommendations)
 # ---------------------------------------------------------------------------
 
 def r2_key_source_video(job_id: str) -> str:
@@ -124,6 +125,11 @@ def r2_key_transcript(job_id: str) -> str:
 def r2_key_transcription(job_id: str) -> str:
     """User-facing plain-text transcript of the final rendered video."""
     return f"jobs/{job_id}/transcription.txt"
+
+
+def r2_key_recommendations(job_id: str) -> str:
+    """User-facing CSV of stock recommendations extracted from the transcript."""
+    return f"jobs/{job_id}/recommendations.csv"
 
 
 # ---------------------------------------------------------------------------

@@ -58,6 +58,13 @@ MIN_SEGMENT_SEC = 0.5  # drop segments shorter than this
 PAD_SEC = 0.5          # pad each segment start/end by this many seconds
                        # (render.py adds further padding at cut time)
 
+# ---------------------------------------------------------------------------
+# WhisperX transcription config (transcript ACCURACY tuning)
+# ---------------------------------------------------------------------------
+# large-v3 recognises proper nouns / multilingual (Hinglish) speech notably
+# better than large-v2, at the same model size (no extra VRAM).
+WHISPER_MODEL = "large-v3"
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -117,11 +124,11 @@ def run_diarization(
             ) from exc
 
     # ---- 3. WhisperX transcribe -----------------------------------------
-    progress(job_id, percent=10.0, message="Loading Whisper large-v2...")
+    progress(job_id, percent=10.0, message=f"Loading Whisper {WHISPER_MODEL}...")
     audio = whisperx.load_audio(str(local_audio))
 
     try:
-        model = whisperx.load_model("large-v2", device, compute_type=compute_type)
+        model = whisperx.load_model(WHISPER_MODEL, device, compute_type=compute_type)
         result = model.transcribe(audio, batch_size=16)
     except Exception as exc:  # noqa: BLE001
         raise DiarizationError(

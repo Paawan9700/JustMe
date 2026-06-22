@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { getJob, selectSpeaker } from "../lib/api";
+import { getJob, selectSpeaker, generateRecommendations } from "../lib/api";
 import ProgressBar from "../components/ProgressBar";
 import SpeakerCard from "../components/SpeakerCard";
 
@@ -26,8 +26,11 @@ export default function JobStatus() {
   const [loadError, setLoadError] = useState(null);
   const [selecting, setSelecting] = useState(null); // label currently being selected
   const [selectError, setSelectError] = useState(null);
+  const [generating, setGenerating] = useState(false); // recommendations in flight
+  const [genError, setGenError] = useState(null);
   const timerRef = useRef(null);
   const tickRef = useRef(null);
+  const recsTimerRef = useRef(null);
 
   // ---- polling loop -----------------------------------------------------
   // We stop polling on AWAITING_SELECTION (in addition to DONE/FAILED):
@@ -97,6 +100,51 @@ export default function JobStatus() {
     }
   }
 
+  // ---- stock recommendations -------------------------------------------
+  // The job stays DONE while recommendations generate, so the main poller
+  // (which stops at DONE) won't track this. We run a dedicated poll loop
+  // that ends as soon as recommendations_status leaves GENERATING.
+  useEffect(() => () => {
+    if (recsTimerRef.current) clearInterval(recsTimerRef.current);
+  }, []);
+
+  async function pollRecs() {
+    try {
+      const data = await getJob(jobId);
+      setJob(data);
+      if (data.recommendations_status !== "GENERATING") {
+        clearInterval(recsTimerRef.current);
+        recsTimerRef.current = null;
+        setGenerating(false);
+      }
+    } catch (err) {
+      clearInterval(recsTimerRef.current);
+      recsTimerRef.current = null;
+      setGenerating(false);
+      setGenError(err.message || "Failed to check recommendation status");
+    }
+  }
+
+  async function onGenerateRecommendations() {
+    if (generating) return;
+    setGenError(null);
+    setGenerating(true);
+    try {
+      await generateRecommendations(jobId);
+      // Immediate poll so the UI reflects GENERATING without waiting POLL_MS.
+      const data = await getJob(jobId);
+      setJob(data);
+      if (data.recommendations_status === "GENERATING" && !recsTimerRef.current) {
+        recsTimerRef.current = setInterval(pollRecs, POLL_MS);
+      } else {
+        setGenerating(false);
+      }
+    } catch (err) {
+      setGenError(err.message || "Failed to start generation");
+      setGenerating(false);
+    }
+  }
+
   // ---- render: load / error states -------------------------------------
   if (!job && !loadError) {
     return <div className="center-load" data-testid="job-loading">Loading job…</div>;
@@ -148,7 +196,14 @@ export default function JobStatus() {
           />
         )}
         {status === "RENDERING" && <Rendering job={job} />}
-        {status === "DONE" && <Done job={job} />}
+        {status === "DONE" && (
+          <Done
+            job={job}
+            onGenerate={onGenerateRecommendations}
+            generating={generating}
+            genError={genError}
+          />
+        )}
         {status === "FAILED" && <Failed job={job} />}
       </div>
     </main>
@@ -242,7 +297,7 @@ function Rendering({ job }) {
 /* --------------------------------------------------------------------- */
 /* State D — Done                                                       */
 /* --------------------------------------------------------------------- */
-function Done({ job }) {
+function Done({ job, onGenerate, generating, genError }) {
   const stats = buildDoneStats(job);
   return (
     <div className="done-block" data-testid="state-done">
@@ -282,6 +337,13 @@ function Done({ job }) {
         </a>
       )}
 
+      <Recommendations
+        job={job}
+        onGenerate={onGenerate}
+        generating={generating}
+        genError={genError}
+      />
+
       <Link to="/" className="ghost-btn" data-testid="process-another-link"
             style={{ alignSelf: "flex-start", textDecoration: "none" }}>
         Process another video
@@ -307,6 +369,80 @@ function buildDoneStats(job) {
     parts.push(`from a ${hrs}-hour video`);
   }
   return parts.join(" ");
+}
+
+/* --------------------------------------------------------------------- */
+/* Stock recommendations (LLM → downloadable CSV)                        */
+/* --------------------------------------------------------------------- */
+function Recommendations({ job, onGenerate, generating, genError }) {
+  // Only offered once a transcript exists — there's nothing to analyse otherwise.
+  if (!job.transcription_url) return null;
+
+  const recStatus = job.recommendations_status;
+
+  if (recStatus === "READY" && job.recommendations_url) {
+    return (
+      <div className="recs-block" data-testid="recommendations-ready">
+        <a
+          className="download-btn"
+          href={job.recommendations_url}
+          download
+          target="_blank"
+          rel="noopener noreferrer"
+          data-testid="download-recommendations-btn"
+        >
+          Download Stock Recommendations (CSV)
+        </a>
+        <button
+          type="button"
+          className="ghost-btn"
+          onClick={onGenerate}
+          disabled={generating}
+          data-testid="regenerate-recommendations-btn"
+          style={{ alignSelf: "flex-start" }}
+        >
+          {generating ? "Regenerating…" : "Regenerate"}
+        </button>
+      </div>
+    );
+  }
+
+  if (recStatus === "GENERATING" || generating) {
+    return (
+      <div
+        className="recs-generating"
+        data-testid="recommendations-generating"
+        style={{ display: "flex", alignItems: "center", gap: 12 }}
+      >
+        <div className="spinner" style={{ width: 24, height: 24, borderWidth: 2 }} />
+        <span>Generating stock recommendations…</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="recs-block" data-testid="recommendations-idle">
+      <button
+        type="button"
+        className="primary-btn"
+        onClick={onGenerate}
+        data-testid="generate-recommendations-btn"
+        style={{ alignSelf: "flex-start" }}
+      >
+        Generate Stock Recommendations
+      </button>
+      {recStatus === "FAILED" && (
+        <p className="error-text" data-testid="recommendations-error" style={{ marginTop: 10 }}>
+          {job.recommendations_error || "Generation failed. Please try again."}
+        </p>
+      )}
+      {genError && (
+        <p className="error-text" data-testid="recommendations-gen-error" style={{ marginTop: 10 }}>
+          {genError}
+        </p>
+      )}
+    </div>
+  );
 }
 
 /* --------------------------------------------------------------------- */

@@ -62,6 +62,10 @@ class JobResponse(BaseModel):
     selected_speaker: Optional[str] = None
     download_url: Optional[str] = None  # presigned, only when status == DONE
     transcription_url: Optional[str] = None  # presigned .txt, only when status == DONE
+    # Stock-recommendations sub-resource (independent of `status`).
+    recommendations_status: Optional[str] = None  # None | GENERATING | READY | FAILED
+    recommendations_url: Optional[str] = None  # presigned .csv, only when READY
+    recommendations_error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -69,3 +73,8 @@ class JobResponse(BaseModel):
 class SelectSpeakerResponse(BaseModel):
     job_id: str
     status: str
+
+
+class GenerateRecommendationsResponse(BaseModel):
+    job_id: str
+    recommendations_status: str

@@ -33,6 +33,7 @@ _CONTENT_TYPES = {
     ".webm": "video/webm",
     ".txt": "text/plain; charset=utf-8",
     ".json": "application/json",
+    ".csv": "text/csv; charset=utf-8",
 }
 
 

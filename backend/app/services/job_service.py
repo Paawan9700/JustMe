@@ -63,7 +63,12 @@ async def create_job(youtube_url: str) -> dict[str, Any]:
             "final_video_key": None,
             "transcript_key": None,       # structured transcript.json (Phase-2 source)
             "transcription_key": None,    # plain-text transcript of the final video
+            "recommendations_key": None,  # CSV of LLM-extracted stock recommendations
         },
+        # Stock-recommendations sub-resource. Independent of the main job
+        # state machine: the job stays DONE while this is generated.
+        # status: None | GENERATING | READY | FAILED
+        "recommendations": {"status": None, "error": None, "count": 0},
         "speakers": [],
         "selected_speaker": None,
         "task_id": None,
@@ -164,6 +169,24 @@ async def get_job_hydrated(job_id: str) -> dict[str, Any] | None:
             response_content_type="text/plain; charset=utf-8",
         )
     doc["transcription_url"] = transcription_url
+
+    # Stock recommendations sub-resource. Surface the status/error always so
+    # the frontend can drive its button, and a presigned CSV download URL once
+    # READY. No `inline` — we want a file download.
+    recommendations = doc.get("recommendations") or {}
+    rec_status = recommendations.get("status")
+    doc["recommendations_status"] = rec_status
+    rec_error = recommendations.get("error")
+    doc["recommendations_error"] = rec_error.get("message") if rec_error else None
+
+    recommendations_url = None
+    recommendations_key = artifacts.get("recommendations_key")
+    if rec_status == "READY" and recommendations_key:
+        recommendations_url = storage.get_presigned_url(
+            recommendations_key,
+            response_content_type="text/csv; charset=utf-8",
+        )
+    doc["recommendations_url"] = recommendations_url
 
     return doc
 
@@ -311,6 +334,109 @@ async def select_speaker(job_id: str, speaker_label: str) -> dict[str, Any]:
         }
 
     return {"ok": True, "job": updated}
+
+
+# ---------------------------------------------------------------------------
+# Stock recommendations sub-resource
+# ---------------------------------------------------------------------------
+
+async def claim_recommendations_generating(job_id: str) -> dict[str, Any]:
+    """
+    Atomically move the job's recommendations sub-resource into GENERATING,
+    but only when it's eligible. The job's own status is NOT touched (it stays
+    DONE) — recommendations is an independent sub-resource.
+
+    Returns {"ok": bool, "error_code": str, "message": str,
+             "current_status": str | None}.
+
+    error_code values:
+      - "NOT_FOUND"          -> 404
+      - "WRONG_STATE"        -> 409 (job not DONE)
+      - "NO_TRANSCRIPT"      -> 422 (no transcription.txt to read)
+      - "ALREADY_GENERATING" -> 409
+    """
+    db = get_db()
+    job = await db.jobs.find_one(
+        {"job_id": job_id},
+        {"_id": 0, "status": 1, "artifacts": 1, "recommendations": 1},
+    )
+    if job is None:
+        return {"ok": False, "error_code": "NOT_FOUND", "message": "Job not found"}
+
+    if job.get("status") != JobStatus.DONE.value:
+        return {
+            "ok": False,
+            "error_code": "WRONG_STATE",
+            "current_status": job.get("status"),
+            "message": "Recommendations can only be generated once the job is DONE",
+        }
+
+    if not (job.get("artifacts") or {}).get("transcription_key"):
+        return {
+            "ok": False,
+            "error_code": "NO_TRANSCRIPT",
+            "message": "This job has no transcript to generate recommendations from",
+        }
+
+    if (job.get("recommendations") or {}).get("status") == "GENERATING":
+        return {
+            "ok": False,
+            "error_code": "ALREADY_GENERATING",
+            "message": "Recommendations are already being generated",
+        }
+
+    # CAS: only flip to GENERATING if still DONE and not already GENERATING.
+    # The $ne match also covers older docs missing the `recommendations` field.
+    updated = await db.jobs.find_one_and_update(
+        {
+            "job_id": job_id,
+            "status": JobStatus.DONE.value,
+            "recommendations.status": {"$ne": "GENERATING"},
+        },
+        {
+            "$set": {
+                "recommendations.status": "GENERATING",
+                "recommendations.error": None,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+        projection={"_id": 0},
+    )
+    if updated is None:
+        # Lost the race (a concurrent request claimed it first).
+        return {
+            "ok": False,
+            "error_code": "ALREADY_GENERATING",
+            "message": "Recommendations are already being generated",
+        }
+
+    return {"ok": True, "job": updated}
+
+
+async def set_recommendations_status(
+    job_id: str,
+    status: str,
+    *,
+    error: dict[str, str] | None = None,
+    key: str | None = None,
+    count: int | None = None,
+) -> None:
+    """
+    Update the recommendations sub-resource. Used by the background task to
+    record READY (with the CSV key + row count) or FAILED (with an error).
+    """
+    db = get_db()
+    set_doc: dict[str, Any] = {
+        "recommendations.status": status,
+        "recommendations.error": error,
+        "updated_at": datetime.now(timezone.utc),
+    }
+    if key is not None:
+        set_doc["artifacts.recommendations_key"] = key
+    if count is not None:
+        set_doc["recommendations.count"] = int(count)
+    await db.jobs.update_one({"job_id": job_id}, {"$set": set_doc})
 
 
 # ---------------------------------------------------------------------------

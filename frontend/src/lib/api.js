@@ -42,3 +42,11 @@ export async function selectSpeaker(jobId, speakerLabel) {
   });
   return handle(r);
 }
+
+export async function generateRecommendations(jobId) {
+  const r = await fetch(`${BASE}/api/jobs/${jobId}/generate-recommendations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  return handle(r);
+}

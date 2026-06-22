@@ -331,6 +331,19 @@ a:hover { color: var(--accent-hi); }
   flex-direction: column;
   gap: 18px;
 }
+/* Stock-recommendations block sits inside .done-block; keep its own children
+   stacked with the same rhythm as the surrounding download buttons. */
+.recs-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+}
+.recs-generating {
+  color: var(--text-dim);
+  font-size: 14px;
+}
 .done-title {
   font-size: 28px;
   font-weight: 600;
