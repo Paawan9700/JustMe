@@ -65,6 +65,20 @@ PAD_SEC = 0.5          # pad each segment start/end by this many seconds
 # better than large-v2, at the same model size (no extra VRAM).
 WHISPER_MODEL = "large-v3"
 
+# WhisperX runs an internal VAD (voice-activity detector) that gates the audio
+# BEFORE Whisper transcribes it — audio the VAD misses is never transcribed and
+# so can never reach transcript.json / transcription.txt / the LLM. The library
+# defaults (vad_onset=0.500, vad_offset=0.363) are precision-first and were
+# dropping clearly-audible speech (measured -25..-30 dB) whenever the speaker
+# paused briefly mid-sentence — e.g. an analyst's stop-loss/targets/reasoning.
+# We tune recall-first (project rule: "never fewer words; more is acceptable"):
+#   vad_onset  lower  -> trigger "speech" more readily (quieter onsets kept)
+#   vad_offset lower  -> hold the speech region open through brief 0.4-0.7 s
+#                        dips instead of ending it and discarding trailing audio
+# chunk_size stays at the library default. Passed as a partial dict — WhisperX
+# merges it over its defaults, so only these keys change.
+VAD_OPTIONS = {"vad_onset": 0.30, "vad_offset": 0.20, "chunk_size": 30}
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -128,7 +142,10 @@ def run_diarization(
     audio = whisperx.load_audio(str(local_audio))
 
     try:
-        model = whisperx.load_model(WHISPER_MODEL, device, compute_type=compute_type)
+        model = whisperx.load_model(
+            WHISPER_MODEL, device, compute_type=compute_type,
+            vad_method="pyannote", vad_options=dict(VAD_OPTIONS),
+        )
         result = model.transcribe(audio, batch_size=16)
     except Exception as exc:  # noqa: BLE001
         raise DiarizationError(
