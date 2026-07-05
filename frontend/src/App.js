@@ -1,6 +1,6 @@
 import React from "react";
 import { Routes, Route, Link } from "react-router-dom";
-import { Activity, ListChecks } from "lucide-react";
+import { AudioLines, ListChecks } from "lucide-react";
 import Home from "./pages/Home";
 import JobStatus from "./pages/JobStatus";
 import MyJobs from "./pages/MyJobs";
@@ -16,10 +16,10 @@ export default function App() {
             data-testid="brand-home-link"
           >
             <span className="grid h-9 w-9 place-items-center rounded-xl bg-accent-grad shadow-glow-accent transition-transform duration-200 group-hover:scale-105">
-              <Activity className="h-5 w-5 text-white" strokeWidth={2.5} />
+              <AudioLines className="h-5 w-5 text-white" strokeWidth={2.5} />
             </span>
             <span className="text-lg font-bold tracking-tight text-white">
-              just<span className="text-accent-soft">.</span>me
+              Alpha<span className="text-accent-soft">vox</span>
             </span>
           </Link>
 
@@ -66,7 +66,7 @@ export default function App() {
 
       <footer className="mt-auto border-t border-white/[0.05] py-6">
         <p className="text-center font-mono text-[11px] text-slate-700">
-          JustMe.ai — your words, your edit, your edge.
+          Alphavox — your words, your edit, your edge.
         </p>
       </footer>
     </div>

@@ -52,12 +52,22 @@ function StatusBadge({ status }) {
   );
 }
 
+// The backend stores created_at as UTC, but Mongo returns it naive so it
+// serializes without a 'Z'/offset. Left alone, JS would parse it as LOCAL
+// time and skew the age by the user's timezone. Append 'Z' when no timezone
+// designator is present so it's always read as UTC.
+function toUtcDate(iso) {
+  if (!iso) return null;
+  const s = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`;
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 // Small relative-time helper — no date library needed.
 function timeAgo(iso) {
-  if (!iso) return "";
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "";
-  const secs = Math.max(0, Math.round((Date.now() - then) / 1000));
+  const d = toUtcDate(iso);
+  if (!d) return "";
+  const secs = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
   if (secs < 60) return "just now";
   const mins = Math.round(secs / 60);
   if (mins < 60) return `${mins} min${mins === 1 ? "" : "s"} ago`;
@@ -210,7 +220,7 @@ export default function MyJobs() {
                         </p>
                         <p
                           className="mt-1 font-mono text-xs text-slate-500"
-                          title={job.created_at ? new Date(job.created_at).toLocaleString() : ""}
+                          title={toUtcDate(job.created_at)?.toLocaleString() || ""}
                         >
                           {timeAgo(job.created_at)}
                         </p>
