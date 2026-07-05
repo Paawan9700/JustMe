@@ -99,6 +99,35 @@ async def get_job_raw(job_id: str) -> dict[str, Any] | None:
     return doc
 
 
+async def list_jobs(limit: int = 100) -> list[dict[str, Any]]:
+    """
+    Return recent jobs (newest first) as lightweight summary dicts for the
+    My Jobs list. Deliberately does NOT hydrate presigned URLs — a projection
+    keeps this cheap and avoids per-job R2 signing (contrast get_job_hydrated).
+
+    Sort is index-backed by `created_at_idx` (ascending index serves the
+    descending walk), so no new index is needed.
+    """
+    db = get_db()
+    projection = {
+        "_id": 0,
+        "job_id": 1,
+        "status": 1,
+        "video_title": 1,
+        "youtube_url": 1,
+        "duration_sec": 1,
+        "progress.percent": 1,
+        "selected_speaker": 1,
+        "created_at": 1,
+        "updated_at": 1,
+    }
+    cursor = db.jobs.find({}, projection).sort("created_at", -1).limit(limit)
+    docs = await cursor.to_list(length=limit)
+    for d in docs:
+        d["progress_percent"] = (d.pop("progress", None) or {}).get("percent", 0.0)
+    return docs
+
+
 async def get_job_hydrated(job_id: str) -> dict[str, Any] | None:
     """
     Same as get_job_raw, plus:
@@ -448,6 +477,7 @@ __all__ = [
     "create_job",
     "get_job_hydrated",
     "get_job_raw",
+    "list_jobs",
     "select_speaker",
     "set_task_id",
     "transition_status",

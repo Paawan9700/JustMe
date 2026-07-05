@@ -34,6 +34,11 @@ export async function getJob(jobId) {
   return handle(r);
 }
 
+export async function listJobs() {
+  const r = await fetch(`${BASE}/api/jobs`);
+  return handle(r);
+}
+
 export async function selectSpeaker(jobId, speakerLabel) {
   const r = await fetch(`${BASE}/api/jobs/${jobId}/select-speaker`, {
     method: "POST",

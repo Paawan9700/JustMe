@@ -2,6 +2,7 @@
 HTTP endpoints for job lifecycle:
 
     POST /api/jobs                          - create a new job
+    GET  /api/jobs                          - list recent jobs (My Jobs)
     GET  /api/jobs/{job_id}                 - read job + hydrated URLs
     POST /api/jobs/{job_id}/select-speaker  - user picks their voice
 
@@ -22,6 +23,7 @@ from app.models.job import (
     JobCreateRequest,
     JobCreateResponse,
     JobResponse,
+    JobSummaryResponse,
     SelectSpeakerRequest,
     SelectSpeakerResponse,
 )
@@ -143,6 +145,16 @@ async def create_job(payload: JobCreateRequest) -> JobCreateResponse:
         ) from exc
 
     return JobCreateResponse(job_id=job["job_id"], status=job["status"])
+
+
+# ---------------------------------------------------------------------------
+# GET /api/jobs   (My Jobs list — lightweight, no presigned URLs)
+# ---------------------------------------------------------------------------
+
+@router.get("", response_model=list[JobSummaryResponse])
+async def list_jobs(limit: int = 100) -> list[JobSummaryResponse]:
+    docs = await job_service.list_jobs(limit=limit)
+    return [JobSummaryResponse(**d) for d in docs]
 
 
 # ---------------------------------------------------------------------------

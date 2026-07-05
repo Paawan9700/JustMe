@@ -70,6 +70,20 @@ class JobResponse(BaseModel):
     updated_at: datetime
 
 
+class JobSummaryResponse(BaseModel):
+    """Lightweight row for the My Jobs list. Strict subset of the job doc —
+    no presigned URLs / speakers / artifacts, so listing stays cheap."""
+    job_id: str
+    status: str
+    video_title: Optional[str] = None
+    youtube_url: str  # title fallback in UI (video_title is null early on)
+    duration_sec: int = 0
+    progress_percent: float = 0.0  # flattened from progress.percent
+    selected_speaker: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class SelectSpeakerResponse(BaseModel):
     job_id: str
     status: str
