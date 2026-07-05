@@ -122,6 +122,100 @@
   animation: spin 0.85s linear infinite;
 }
 
+/* --------------------------------------------------------------------- */
+/* Neural Alpha Engine — "AI is working" rainbow treatment.               */
+/* A masked conic-gradient ring that rotates around the card edge, a      */
+/* breathing multi-colour glow, and a shifting gradient headline.         */
+/* --------------------------------------------------------------------- */
+
+/* Animatable custom angle (drives the conic rotation). Where unsupported,
+   the ring simply renders as a static rainbow border — still a clear cue. */
+@property --neural-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+/* Rotating rainbow border. Absolutely positioned inside an overflow-hidden
+   card; the mask punches out the interior so only a thin ring paints. */
+.neural-ring {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: inherit;
+  padding: 1.5px; /* ring thickness */
+  background: conic-gradient(
+    from var(--neural-angle),
+    #ff5f6d,
+    #ffc371,
+    #f9f871,
+    #47e5bd,
+    #3b82f6,
+    #a855f7,
+    #ff5f6d
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: neural-spin 4s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes neural-spin {
+  to {
+    --neural-angle: 360deg;
+  }
+}
+
+/* Breathing outer glow on the card while generating. */
+.neural-generating {
+  animation: neural-breathe 3s ease-in-out infinite;
+}
+
+@keyframes neural-breathe {
+  0%,
+  100% {
+    box-shadow:
+      0 8px 40px rgba(0, 0, 0, 0.45),
+      0 0 22px -8px rgba(124, 92, 255, 0.55),
+      0 0 42px -12px rgba(59, 130, 246, 0.4);
+  }
+  50% {
+    box-shadow:
+      0 8px 40px rgba(0, 0, 0, 0.45),
+      0 0 46px -4px rgba(168, 85, 247, 0.7),
+      0 0 82px -8px rgba(71, 229, 189, 0.5);
+  }
+}
+
+/* Shifting rainbow headline text for the generating status line. */
+.neural-text {
+  background: linear-gradient(90deg, #9d86ff, #47e5bd, #60a5fa, #a855f7, #9d86ff);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: neural-text-shift 3s linear infinite;
+}
+
+@keyframes neural-text-shift {
+  to {
+    background-position: 200% center;
+  }
+}
+
+/* Respect users who prefer reduced motion — keep the colour cue, drop the
+   movement (static rainbow ring + steady glow still read as "working"). */
+@media (prefers-reduced-motion: reduce) {
+  .neural-ring,
+  .neural-generating,
+  .neural-text {
+    animation: none;
+  }
+}
+
 /* Native audio control theming — nudge it toward the dark palette */
 audio {
   width: 100%;

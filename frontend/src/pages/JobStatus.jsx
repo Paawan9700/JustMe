@@ -13,9 +13,9 @@ import {
   ArrowLeft,
   Home as HomeIcon,
   Film,
-  TrendingUp,
   Check,
   Clock,
+  BrainCircuit,
 } from "lucide-react";
 import { getJob, selectSpeaker, generateRecommendations } from "../lib/api";
 import ProgressBar from "../components/ProgressBar";
@@ -588,19 +588,30 @@ function Recommendations({ job, onGenerate, generating, genError }) {
   const isGenerating = recStatus === "GENERATING" || generating;
 
   return (
-    <div className="glass relative overflow-hidden p-7 sm:p-9">
+    <div
+      className={`glass relative overflow-hidden p-7 sm:p-9 ${
+        isGenerating ? "neural-generating" : ""
+      }`}
+      data-testid="recommendations-card"
+    >
+      {/* rotating rainbow border — only while the AI is doing the heavy lifting */}
+      {isGenerating && <span className="neural-ring" aria-hidden="true" />}
+
       {/* faint trading-grid backdrop */}
       <div className="pointer-events-none absolute inset-0 bg-grid-faint bg-[length:32px_32px] opacity-60" />
       <div className="relative">
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-center gap-3">
-            <span className="grid h-11 w-11 place-items-center rounded-2xl bg-accent-grad shadow-glow-accent">
-              <TrendingUp className="h-5 w-5 text-white" />
+            {/* animated AI icon — gentle float with a softly pulsing glow ring */}
+            <span className="relative inline-grid animate-float">
+              <span className="grid h-11 w-11 place-items-center rounded-2xl bg-accent-grad shadow-glow-accent animate-pulse-ring">
+                <BrainCircuit className="h-5 w-5 text-white" />
+              </span>
             </span>
             <div>
-              <p className="label-mono">Insights</p>
+              <p className="label-mono">Neural Analysis</p>
               <h3 className="mt-1 text-lg font-bold tracking-tight text-white">
-                Stock Recommendations
+                Neural Alpha Engine
               </h3>
             </div>
           </div>
@@ -610,11 +621,17 @@ function Recommendations({ job, onGenerate, generating, genError }) {
               Ready
             </span>
           )}
+          {isGenerating && (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 font-mono text-[11px] uppercase tracking-wider">
+              <Loader2 className="h-3 w-3 animate-spin text-accent-soft" />
+              <span className="neural-text">Processing</span>
+            </span>
+          )}
         </div>
 
         <p className="mt-4 max-w-lg text-sm leading-relaxed text-slate-400">
-          We analyse your transcript with an LLM and surface the tickers and
-          themes you mentioned, exported as a clean CSV.
+          Get stock insights from our advanced AI intelligence based on what you
+          have spoken.
         </p>
 
         <div className="mt-6">
@@ -646,11 +663,18 @@ function Recommendations({ job, onGenerate, generating, genError }) {
             </div>
           ) : isGenerating ? (
             <div
-              className="recs-generating inline-flex items-center gap-3 rounded-xl border border-accent/20 bg-accent/[0.06] px-4 py-3 text-sm text-slate-300"
+              className="recs-generating flex items-center gap-3"
               data-testid="recommendations-generating"
             >
               <Loader2 className="h-5 w-5 animate-spin text-accent-soft" />
-              <span>Generating stock recommendations…</span>
+              <div>
+                <p className="neural-text text-sm font-semibold">
+                  Neural engine analysing your transcript…
+                </p>
+                <p className="mt-0.5 font-mono text-[11px] text-slate-500">
+                  Surfacing tickers &amp; themes — this can take a moment.
+                </p>
+              </div>
             </div>
           ) : (
             <div className="recs-block flex flex-col items-start gap-3" data-testid="recommendations-idle">
