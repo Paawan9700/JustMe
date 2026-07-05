@@ -136,7 +136,8 @@ export default function Home() {
           className="mt-4 font-mono text-xs text-slate-600"
           data-testid="home-helper"
         >
-          Works with videos up to 15 hours. Livestreams aren&rsquo;t supported.
+          Handles videos up to 15 hours, including past livestreams.
+          Currently-live broadcasts aren&rsquo;t supported.
         </p>
       </motion.form>
 

@@ -1,9 +1,44 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Routes, Route, Link } from "react-router-dom";
+import { AnimatePresence, motion } from "framer-motion";
 import { AudioLines, ListChecks } from "lucide-react";
 import Home from "./pages/Home";
 import JobStatus from "./pages/JobStatus";
 import MyJobs from "./pages/MyJobs";
+
+// The three plain-language steps of what Alphavox does, in journey order.
+// Cycled in the header chip so a first-time visitor gets the pitch at a glance.
+const PITCH_STEPS = ["Paste a link", "Pick your voice", "Get just you"];
+
+function PitchChip() {
+  const [i, setI] = useState(0);
+  useEffect(() => {
+    const id = setInterval(
+      () => setI((prev) => (prev + 1) % PITCH_STEPS.length),
+      2400
+    );
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <span className="hidden items-center gap-2 rounded-full border border-accent/25 bg-accent/10 px-3 py-1 font-mono text-[11px] font-medium text-accent-soft sm:inline-flex">
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+      <span className="relative inline-grid min-w-[104px] place-items-start overflow-hidden">
+        <AnimatePresence mode="wait">
+          <motion.span
+            key={i}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+            className="col-start-1 row-start-1 whitespace-nowrap"
+          >
+            {PITCH_STEPS[i]}
+          </motion.span>
+        </AnimatePresence>
+      </span>
+    </span>
+  );
+}
 
 export default function App() {
   return (
@@ -32,11 +67,7 @@ export default function App() {
               <ListChecks className="h-3.5 w-3.5" />
               My Jobs
             </Link>
-            <span className="hidden items-center gap-1.5 rounded-full border border-bull/25 bg-bull/10 px-3 py-1 font-mono text-[11px] font-medium text-bull-soft sm:inline-flex">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-bull" />
-              AI · live
-            </span>
-            <span className="font-mono text-xs text-slate-600">v0.2 — m2</span>
+            <PitchChip />
           </div>
         </div>
       </header>
