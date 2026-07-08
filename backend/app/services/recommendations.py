@@ -1,10 +1,11 @@
 """
 Stock-recommendations feature.
 
-Given a job's final-video transcript (`transcription.txt` in R2), call an LLM to
-extract the stock recommendations the speaker made and produce a downloadable CSV
-(`recommendations.csv` in R2). The job's own status is never touched — this is an
-independent sub-resource that runs after the job is DONE.
+Given a job's final video (`final.mp4` in R2), call a multimodal LLM (Gemini) to
+transcribe the speaker's Hinglish audio and extract the stock recommendations they
+made, producing a downloadable CSV (`recommendations.csv` in R2). The job's own
+status is never touched — this is an independent sub-resource that runs after the
+job is DONE.
 
 Design:
   * The LLM returns STRUCTURED JSON, not raw CSV. We build the CSV ourselves with
@@ -25,13 +26,14 @@ import json
 import logging
 import os
 import tempfile
+import time
 
 import anyio
 
 from app.core.config import settings
 from app.services import job_service
 from app.services.storage import get_storage
-from shared.constants import r2_key_recommendations, r2_key_transcription
+from shared.constants import r2_key_final_video, r2_key_recommendations
 
 logger = logging.getLogger(__name__)
 
@@ -49,15 +51,18 @@ _FIELD_BY_COLUMN = {
     "REASONING": "reasoning",
 }
 
-# Defensive cap on transcript size sent to the LLM (a 5-min transcript is a few
-# KB; this only guards against a pathological input running up token cost).
-_MAX_TRANSCRIPT_CHARS = 120_000
+# Gemini File API: video uploads go PROCESSING -> ACTIVE before they can be used.
+# Poll with a generous ceiling (processing time scales with clip length).
+_GEMINI_FILE_ACTIVE_TIMEOUT_S = 300
+_GEMINI_FILE_POLL_INTERVAL_S = 2
 
 RECS_SYSTEM_PROMPT = """\
-You extract stock recommendations made by a single speaker from a transcript of \
-their spoken words. When recommending a stock the speaker typically states, in \
-order: the stock name, then CMP (current market price), then a stop-loss, then \
-one or more targets, then the reasoning.
+You are given an AUDIO/VIDEO recording of a SINGLE speaker talking in Hinglish \
+(mixed Hindi and English) who discusses and recommends stocks. FIRST transcribe \
+what the speaker says — paying special attention to NUMBERS (prices, stop-losses, \
+targets) — THEN extract the stock recommendations they make. When recommending a \
+stock the speaker typically states, in order: the stock name, then CMP (current \
+market price), then a stop-loss, then one or more targets, then the reasoning.
 
 Return ONLY a JSON object of this exact shape:
 {"recommendations": [
@@ -94,6 +99,22 @@ risk-reward. Be thorough and specific, but do not pad and do NOT invent anything
 speaker did not say. If the speaker gave no reason, leave it "".
 
 - NEVER fabricate or guess values. If the speaker did not state a field, leave it "".
+
+NUMERIC ACCURACY (the audio is Hinglish and numbers are easy to mishear):
+- Transcribe every number digit-for-digit. Indian speakers often say prices \
+digit-by-digit or mix Hindi and English (e.g. "इक्कीस सौ बीस" / "twenty-one twenty" \
+= 2120). Do NOT drop or merge digits (e.g. do not collapse "2120" into "21").
+- Before returning each recommendation, run an internal PLAUSIBILITY check:
+    * For a BUY, targets are normally ABOVE the CMP and the stop-loss BELOW it.
+    * For a SELL/short, targets are normally BELOW the CMP and the stop-loss ABOVE it.
+    * CMP, stop-loss and targets should share the same order of magnitude. A target \
+of 21 next to a CMP of 2000 almost certainly means "2100" was misheard as "21".
+  If a value fails this check, re-listen and correct it if you can.
+- FLAG uncertainty: append a single trailing asterisk "*" to ANY numeric value you \
+are not fully confident you heard correctly — and ONLY to that specific number. \
+Examples: "cmp": "2050*", "stoploss": "1980", "targets": "T1: 2120*; T2: 2200". \
+Confident numbers get no asterisk. Do NOT add any other confidence commentary; the \
+asterisk is the only signal.
 """
 
 
@@ -120,44 +141,74 @@ def build_recommendations_csv(items: list[dict]) -> str:
     return buf.getvalue()
 
 
-async def _extract_recommendations(transcript: str, video_title: str | None) -> list[dict]:
-    """Call Gemini and return the parsed recommendations list (may be empty)."""
+async def _extract_recommendations(video_path: str, video_title: str | None) -> list[dict]:
+    """
+    Upload the final video to Gemini, wait for it to become ACTIVE, then ask the
+    model to transcribe the (Hinglish) audio and return the recommendations JSON.
+
+    Owns the full Gemini file lifecycle (upload -> poll -> generate -> delete) so
+    the uploaded file is always cleaned up, even on error.
+    """
     # Imported lazily so the app boots even if google-genai isn't installed in
     # an environment that doesn't use this feature.
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=settings.gemini_api_key)
-    user_content = (
-        f"Video title: {video_title or ''}\n\n"
-        f"Transcript:\n{transcript[:_MAX_TRANSCRIPT_CHARS]}"
-    )
-    resp = await client.aio.models.generate_content(
-        model=settings.gemini_model,
-        contents=user_content,
-        config=types.GenerateContentConfig(
-            system_instruction=RECS_SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            temperature=0,
-        ),
-    )
-    content = resp.text or "{}"
-    data = json.loads(content)
-    items = data.get("recommendations", []) if isinstance(data, dict) else []
-    return [i for i in items if isinstance(i, dict)]
+    uploaded = None
+    try:
+        uploaded = await client.aio.files.upload(
+            file=video_path,
+            config=types.UploadFileConfig(mime_type="video/mp4"),
+        )
+        # Video uploads go PROCESSING -> ACTIVE; poll until usable (or give up).
+        deadline = time.monotonic() + _GEMINI_FILE_ACTIVE_TIMEOUT_S
+        while uploaded.state != "ACTIVE":
+            if uploaded.state == "FAILED":
+                raise RuntimeError(f"Gemini file processing failed: {uploaded.error}")
+            if time.monotonic() > deadline:
+                raise TimeoutError("Gemini file did not become ACTIVE in time")
+            await anyio.sleep(_GEMINI_FILE_POLL_INTERVAL_S)
+            uploaded = await client.aio.files.get(name=uploaded.name)
+
+        resp = await client.aio.models.generate_content(
+            model=settings.gemini_model,
+            contents=[uploaded, f"Video title: {video_title or ''}"],
+            config=types.GenerateContentConfig(
+                system_instruction=RECS_SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                temperature=0,
+                media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
+            ),
+        )
+        content = resp.text or "{}"
+        data = json.loads(content)
+        items = data.get("recommendations", []) if isinstance(data, dict) else []
+        return [i for i in items if isinstance(i, dict)]
+    finally:
+        if uploaded is not None:
+            try:
+                await client.aio.files.delete(name=uploaded.name)
+            except Exception:  # noqa: BLE001 — tolerant; 48h TTL is the backstop.
+                logger.warning(
+                    "recommendations: failed to delete Gemini file %s",
+                    getattr(uploaded, "name", "?"),
+                    exc_info=True,
+                )
 
 
 async def generate_for_job(job_id: str) -> None:
     """
-    Background task: read the transcript, call the LLM, build the CSV, upload it
-    to R2, and stamp recommendations.status=READY (or FAILED on any error).
+    Background task: download the final video, have Gemini transcribe its audio
+    and extract recommendations, build the CSV, upload it to R2, and stamp
+    recommendations.status=READY (or FAILED on any error).
 
     The job must already be claimed into GENERATING by the caller
     (`job_service.claim_recommendations_generating`).
     """
     storage = get_storage()
     tmp_dir = tempfile.mkdtemp(prefix=f"recs_{job_id}_")
-    transcript_path = os.path.join(tmp_dir, "transcription.txt")
+    video_path = os.path.join(tmp_dir, "final.mp4")
     csv_path = os.path.join(tmp_dir, "recommendations.csv")
 
     try:
@@ -170,19 +221,14 @@ async def generate_for_job(job_id: str) -> None:
             return
         video_title = job.get("video_title")
 
-        # Download the transcript (best-effort tiny file; off the event loop).
+        # Download the final video, then let Gemini transcribe its audio and
+        # extract the recommendations in one call (off the event loop for the
+        # download). An empty result comes back as {"recommendations": []} ->
+        # a header-only CSV, so there's no empty-input special case here.
         await anyio.to_thread.run_sync(
-            storage.download_file, r2_key_transcription(job_id), transcript_path
+            storage.download_file, r2_key_final_video(job_id), video_path
         )
-        with open(transcript_path, encoding="utf-8") as fh:
-            transcript = fh.read().strip()
-
-        if not transcript:
-            # Transcript exists but is empty: nothing to recommend. Ship an
-            # empty (header-only) CSV rather than failing.
-            items: list[dict] = []
-        else:
-            items = await _extract_recommendations(transcript, video_title)
+        items = await _extract_recommendations(video_path, video_title)
 
         csv_text = build_recommendations_csv(items)
         with open(csv_path, "w", encoding="utf-8") as fh:
@@ -204,7 +250,7 @@ async def generate_for_job(job_id: str) -> None:
             error={"code": "GENERATION_FAILED", "message": str(exc)},
         )
     finally:
-        for path in (transcript_path, csv_path):
+        for path in (video_path, csv_path):
             try:
                 os.remove(path)
             except OSError:

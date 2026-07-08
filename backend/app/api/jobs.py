@@ -225,7 +225,7 @@ async def generate_recommendations(
     job_id: str, background_tasks: BackgroundTasks
 ) -> GenerateRecommendationsResponse:
     """
-    Kick off LLM extraction of stock recommendations from the job's transcript.
+    Kick off LLM extraction of stock recommendations from the job's final video.
     Runs as an in-process background task; the client polls GET /api/jobs/{id}
     and reads `recommendations_status` / `recommendations_url`.
     """
@@ -241,7 +241,7 @@ async def generate_recommendations(
         code = result["error_code"]
         if code == "NOT_FOUND":
             raise HTTPException(status_code=404, detail=result["message"])
-        if code == "NO_TRANSCRIPT":
+        if code == "NO_VIDEO":
             raise HTTPException(status_code=422, detail=result["message"])
         if code in ("WRONG_STATE", "ALREADY_GENERATING"):
             raise HTTPException(status_code=409, detail=result["message"])

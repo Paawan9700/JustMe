@@ -116,6 +116,20 @@ def test_targets_single_column_preserved():
     assert rows[1][CSV_COLUMNS.index("TARGETS")] == "T1: 250; T2: 270"
 
 
+def test_uncertainty_asterisk_rides_inline():
+    # The LLM appends "*" to numbers it isn't sure it heard correctly. The
+    # asterisk must survive the CSV builder intact (it's not a CSV special char,
+    # so no quoting) and .strip() must not eat it.
+    rows = _parse(build_recommendations_csv([{
+        "stock_name": "Bharat Forge", "action": "BUY", "cmp": "2020",
+        "stoploss": "1990", "targets": "T1: 2070; T2: 2120*",
+    }]))
+    assert rows[1][CSV_COLUMNS.index("TARGETS")] == "T1: 2070; T2: 2120*"
+    # A whole flagged value round-trips too.
+    rows2 = _parse(build_recommendations_csv([{"stock_name": "X", "cmp": "2050*"}]))
+    assert rows2[1][CSV_COLUMNS.index("CMP")] == "2050*"
+
+
 def test_non_dict_items_skipped():
     rows = _parse(build_recommendations_csv([
         {"stock_name": "A"}, "garbage", None, 42, {"stock_name": "B"},

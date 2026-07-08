@@ -609,9 +609,8 @@ function Recommendations({ job, onGenerate, generating, genError }) {
               </span>
             </span>
             <div>
-              <p className="label-mono">Neural Analysis</p>
-              <h3 className="mt-1 text-lg font-bold tracking-tight text-white">
-                Neural Alpha Engine
+              <h3 className="text-2xl font-bold tracking-tight text-white">
+                Alpha Engine
               </h3>
             </div>
           </div>

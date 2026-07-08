@@ -381,7 +381,7 @@ async def claim_recommendations_generating(job_id: str) -> dict[str, Any]:
     error_code values:
       - "NOT_FOUND"          -> 404
       - "WRONG_STATE"        -> 409 (job not DONE)
-      - "NO_TRANSCRIPT"      -> 422 (no transcription.txt to read)
+      - "NO_VIDEO"           -> 422 (no final video to read)
       - "ALREADY_GENERATING" -> 409
     """
     db = get_db()
@@ -400,11 +400,11 @@ async def claim_recommendations_generating(job_id: str) -> dict[str, Any]:
             "message": "Recommendations can only be generated once the job is DONE",
         }
 
-    if not (job.get("artifacts") or {}).get("transcription_key"):
+    if not (job.get("artifacts") or {}).get("final_video_key"):
         return {
             "ok": False,
-            "error_code": "NO_TRANSCRIPT",
-            "message": "This job has no transcript to generate recommendations from",
+            "error_code": "NO_VIDEO",
+            "message": "This job has no final video to generate recommendations from",
         }
 
     if (job.get("recommendations") or {}).get("status") == "GENERATING":
