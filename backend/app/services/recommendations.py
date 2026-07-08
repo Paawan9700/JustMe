@@ -56,13 +56,35 @@ _FIELD_BY_COLUMN = {
 _GEMINI_FILE_ACTIVE_TIMEOUT_S = 300
 _GEMINI_FILE_POLL_INTERVAL_S = 2
 
-RECS_SYSTEM_PROMPT = """\
-You are given an AUDIO/VIDEO recording of a SINGLE speaker talking in Hinglish \
-(mixed Hindi and English) who discusses and recommends stocks. FIRST transcribe \
-what the speaker says — paying special attention to NUMBERS (prices, stop-losses, \
-targets) — THEN extract the stock recommendations they make. When recommending a \
-stock the speaker typically states, in order: the stock name, then CMP (current \
-market price), then a stop-loss, then one or more targets, then the reasoning.
+TRANSCRIBE_SYSTEM_PROMPT = """\
+You transcribe a Hinglish (mixed Hindi and English) audio/video of stock-market \
+talk. Produce a faithful, VERBATIM transcript — do NOT summarise or translate.
+
+Rules:
+- Write what is said, in the order it is said. Add nothing that is not spoken.
+- SCRIPT: write everything in the Latin/Roman alphabet — romanise Hindi words, and \
+keep company/stock names and English words in their standard English spelling \
+(e.g. "Bharat Forge", "Kirloskar Brothers"). Do NOT output Devanagari.
+- NUMBERS: write every number digit-for-digit exactly as spoken. Indian speakers \
+mix Hindi/English and may say digits in groups (e.g. "twenty-one twenty" / \
+"इक्कीस सौ बीस" = 2120). Never round, merge, split or "tidy" a number, and never \
+add decimals that were not spoken.
+- CUT-OFF / UNCLEAR: if a word or number is interrupted, cut off, or you cannot \
+make out all of it, write the part you DO hear immediately followed by the literal \
+marker [CUT OFF] — e.g. "...stop loss is 166[CUT OFF]". Do NOT complete or guess \
+the missing part from context or from your own market knowledge.
+- Start a new line at each change of speaker, prefixed "SPEAKER: ".
+- Use ONLY what is audible. NEVER insert a company/stock name, price or fact that \
+is not actually spoken — even when the surrounding talk would let you guess it \
+(e.g. do not name a stock merely because its price levels are mentioned).
+
+Output plain text only (no JSON, no commentary)."""
+
+EXTRACT_SYSTEM_PROMPT = """\
+You are given a TRANSCRIPT of a single stock analyst speaking (Hinglish). Extract \
+ONLY the stock recommendations explicitly present IN THE TRANSCRIPT TEXT. Work \
+solely from the transcript — do NOT use outside market knowledge, and rely on \
+nothing that is not written in it.
 
 Return ONLY a JSON object of this exact shape:
 {"recommendations": [
@@ -70,8 +92,11 @@ Return ONLY a JSON object of this exact shape:
 ]}
 
 Rules:
-- One object per stock the speaker ACTUALLY recommends. If the speaker recommends \
-no stocks, return {"recommendations": []}.
+- One object per stock that is BOTH recommended AND explicitly NAMED in the \
+transcript. The transcript often has price levels/targets/chart talk with NO stock \
+name attached (the analyst commenting on someone else's call) — DROP those entirely: \
+emit no row for a set of levels whose stock name does not appear in the transcript. \
+If there are no named recommendations, return {"recommendations": []}.
 
 - "action" must be exactly "BUY" or "SELL":
     * Use "SELL" when the speaker recommends selling or shorting the stock. Signals \
@@ -81,41 +106,59 @@ referring to the instrument as a futures/derivatives contract in a bearish conte
     * Otherwise use "BUY". This is the default — if it is genuinely unclear, choose \
 "BUY", because most recommendations are buys.
 
-- "stock_name": use the speaker's OWN name for the instrument and PRESERVE any \
-futures/month/derivative qualifier exactly as said — e.g. keep "Axis Bank June \
-Futures", do NOT shorten it to "Axis Bank". Conversely, never ADD a "futures"/month \
-qualifier the speaker did not actually say.
+- "stock_name": copy the analyst's OWN name for the instrument from the transcript, \
+preserving any futures/month/derivative qualifier as written — e.g. keep "Axis Bank \
+June Futures", do NOT shorten it to "Axis Bank"; never ADD a qualifier the transcript \
+lacks. The name MUST be one that appears in the transcript, output in its standard \
+English spelling (e.g. "Bharat Forge"). NEVER infer, guess or supply a name from price \
+levels, chart levels, ticker prices, or your own market knowledge — if the transcript \
+has no name for a set of levels, DROP it (per the first rule).
 
 - Put first and second targets together in the single "targets" field, e.g. \
 "T1: 1500; T2: 1600". If only one target is given, just include that one.
 
 - Derive "date" from the video title ONLY if a date appears there; otherwise use "".
 
-- "reasoning": capture the speaker's FULL rationale for the call, faithfully and in \
-their own framing. Include the technical and/or fundamental points they actually \
-mention — e.g. chart levels, breakout/breakdown, support/resistance, trend, volume, \
-moving averages, quarterly results/earnings, news or catalysts, sector view, and \
-risk-reward. Be thorough and specific, but do not pad and do NOT invent anything the \
-speaker did not say. If the speaker gave no reason, leave it "".
+- "reasoning": summarise the analyst's rationale for THAT call in clear, concise \
+ENGLISH (translate it from the Hinglish transcript — do NOT leave it in Hindi). \
+Cover the technical/fundamental points they actually make — chart levels, breakout/\
+breakdown, support/resistance, trend, volume, results/earnings, news or catalysts, \
+sector view, risk-reward — faithfully; do not pad and do NOT invent anything not in \
+the transcript. If no reason is given, leave it "".
 
 - NEVER fabricate or guess values. If the speaker did not state a field, leave it "".
 
-NUMERIC ACCURACY (the audio is Hinglish and numbers are easy to mishear):
-- Transcribe every number digit-for-digit. Indian speakers often say prices \
-digit-by-digit or mix Hindi and English (e.g. "इक्कीस सौ बीस" / "twenty-one twenty" \
-= 2120). Do NOT drop or merge digits (e.g. do not collapse "2120" into "21").
-- Before returning each recommendation, run an internal PLAUSIBILITY check:
-    * For a BUY, targets are normally ABOVE the CMP and the stop-loss BELOW it.
-    * For a SELL/short, targets are normally BELOW the CMP and the stop-loss ABOVE it.
-    * CMP, stop-loss and targets should share the same order of magnitude. A target \
-of 21 next to a CMP of 2000 almost certainly means "2100" was misheard as "21".
-  If a value fails this check, re-listen and correct it if you can.
-- FLAG uncertainty: append a single trailing asterisk "*" to ANY numeric value you \
-are not fully confident you heard correctly — and ONLY to that specific number. \
-Examples: "cmp": "2050*", "stoploss": "1980", "targets": "T1: 2120*; T2: 2200". \
-Confident numbers get no asterisk. Do NOT add any other confidence commentary; the \
-asterisk is the only signal.
+NUMBERS (copy them from the transcript — do not re-derive):
+- Copy each number EXACTLY as written in the transcript. Do NOT add decimal places \
+or precision the transcript lacks ("2020", never "2020.50"); keep a range as a range \
+("942-943"); do NOT drop or merge digits.
+- If a number in the transcript carries a "[CUT OFF]" marker, or is otherwise \
+incomplete, output only the digits present and append "*" (e.g. "166[CUT OFF]" -> \
+"166*"), or leave the field "" if no digits are present. NEVER complete, pad or \
+guess the missing digits — not from plausibility, not from your own market \
+knowledge. (A value that looks implausibly small beside the others is usually cut \
+off: flag it, do not "fix" it.)
+- FLAG uncertainty: append a single trailing "*" to ANY number you are not confident \
+the transcript states correctly, and ONLY to that number (e.g. "cmp": "2050*", \
+"targets": "T1: 2120*; T2: 2200"). Confident numbers get none; the asterisk is the \
+only signal — add no other commentary.
 """
+
+# Gemini (especially -flash) follows the IMMEDIATE user turn more reliably than a
+# long system prompt, so the highest-stakes rules are RESTATED tersely there too.
+TRANSCRIBE_USER_DIRECTIVE = (
+    "Transcribe this recording now, verbatim. Mark any cut-off or unclear number as "
+    'e.g. "166[CUT OFF]", and NEVER guess the missing digits or insert a stock name '
+    "that was not actually spoken."
+)
+
+EXTRACT_USER_DIRECTIVE = (
+    "Extract the recommendations from the transcript now. HARD RULES: (1) include a "
+    "stock ONLY if its name appears verbatim in the transcript — never infer a name "
+    "from price levels or from your own knowledge; (2) copy numbers exactly as "
+    "written, with no invented decimals; (3) never complete a number marked "
+    '"[CUT OFF]" — output the digits shown + "*" (e.g. "166*") or leave it blank.'
+)
 
 
 def build_recommendations_csv(items: list[dict]) -> str:
@@ -143,8 +186,14 @@ def build_recommendations_csv(items: list[dict]) -> str:
 
 async def _extract_recommendations(video_path: str, video_title: str | None) -> list[dict]:
     """
-    Upload the final video to Gemini, wait for it to become ACTIVE, then ask the
-    model to transcribe the (Hinglish) audio and return the recommendations JSON.
+    Two passes over Gemini, sharing one uploaded file:
+      1. Transcribe the final video's (Hinglish) AUDIO to a faithful verbatim
+         transcript, marking anything not fully audible as "[CUT OFF]".
+      2. Extract structured recommendations from that TRANSCRIPT TEXT only (no
+         audio), so the model can't fill acoustic gaps from its own market
+         knowledge — i.e. invent stock names from price levels or complete
+         cut-off numbers. Pass 2 is held to a checkable rule: the stock name
+         must appear verbatim in the transcript.
 
     Owns the full Gemini file lifecycle (upload -> poll -> generate -> delete) so
     the uploaded file is always cleaned up, even on error.
@@ -171,17 +220,37 @@ async def _extract_recommendations(video_path: str, video_title: str | None) -> 
             await anyio.sleep(_GEMINI_FILE_POLL_INTERVAL_S)
             uploaded = await client.aio.files.get(name=uploaded.name)
 
-        resp = await client.aio.models.generate_content(
+        # ---- Pass 1: faithful verbatim transcription from the AUDIO ----
+        tx_resp = await client.aio.models.generate_content(
             model=settings.gemini_model,
-            contents=[uploaded, f"Video title: {video_title or ''}"],
+            contents=[uploaded, TRANSCRIBE_USER_DIRECTIVE],
             config=types.GenerateContentConfig(
-                system_instruction=RECS_SYSTEM_PROMPT,
-                response_mime_type="application/json",
+                system_instruction=TRANSCRIBE_SYSTEM_PROMPT,
                 temperature=0,
                 media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
             ),
         )
-        content = resp.text or "{}"
+        transcript = (tx_resp.text or "").strip()
+        if not transcript:
+            logger.warning("recommendations: pass 1 returned an empty transcript")
+            return []
+
+        # ---- Pass 2: extract structured recs from the TRANSCRIPT TEXT only ----
+        # No file/audio here — the model can only use the transcribed words, so it
+        # cannot invent a name from price levels or complete a "[CUT OFF]" number.
+        ex_resp = await client.aio.models.generate_content(
+            model=settings.gemini_model,
+            contents=[
+                f"Video title: {video_title or ''}\n\n"
+                f"TRANSCRIPT:\n{transcript}\n\n{EXTRACT_USER_DIRECTIVE}"
+            ],
+            config=types.GenerateContentConfig(
+                system_instruction=EXTRACT_SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                temperature=0,
+            ),
+        )
+        content = ex_resp.text or "{}"
         data = json.loads(content)
         items = data.get("recommendations", []) if isinstance(data, dict) else []
         return [i for i in items if isinstance(i, dict)]

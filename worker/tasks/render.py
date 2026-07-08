@@ -81,6 +81,16 @@ SILENCE_NOISE_DB = -30.0          # below this level counts as silence
 SILENCE_MIN_SILENCE_SEC = 0.5     # shortest silence gap that stops extension
 SILENCE_EXTEND_MAX_SEC = 20.0     # safety cap on how far a turn may grow per side
 
+# Talk-over recovery: when another speaker starts BEFORE the selected speaker's
+# turn boundary (they briefly talk over each other), the selected speaker's own
+# leading/trailing words are usually still audible under/around the other voice.
+# The silence-aware extension would otherwise stop dead at the overlap and clip
+# those words — e.g. an analyst's final stop-loss number cut off the instant the
+# anchor cuts in. We instead recover up to this many seconds INTO the overlap,
+# per side. Bleed is bounded and still halts at the first real silence
+# (recall over precision — a couple of seconds of the other voice is acceptable).
+OVERLAP_EXTEND_SEC = 3.0
+
 
 class RenderError(Exception):
     """User-facing render failure with an error code."""
@@ -385,6 +395,7 @@ def silence_aware_extend(
     silences: list[tuple[float, float]],
     max_extend_sec: float = SILENCE_EXTEND_MAX_SEC,
     duration_sec: float | None = None,
+    overlap_extend_sec: float = OVERLAP_EXTEND_SEC,
 ) -> list[dict[str, Any]]:
     """
     Grow each selected-speaker segment outward over adjacent NON-SILENT
@@ -420,8 +431,12 @@ def silence_aware_extend(
             for os, oe in others:
                 if os >= en:
                     limit = min(limit, os)
-                elif os <= en < oe:   # other speaker already spans our end
-                    limit = en
+                elif os <= en < oe:
+                    # Another speaker is already talking OVER our end. Our own
+                    # trailing words are very likely still here, so recover a
+                    # BOUNDED bit into the overlap instead of stopping dead at
+                    # `en` (the silence loop below still halts us at a real pause).
+                    limit = min(limit, en + overlap_extend_sec)
             # Stop at the first silence that starts after `en`.
             for a, b in sil:
                 if a > en:
@@ -436,8 +451,11 @@ def silence_aware_extend(
             for os, oe in others:
                 if oe <= st:
                     limit = max(limit, oe)
-                elif os < st <= oe:   # other speaker already spans our start
-                    limit = st
+                elif os < st <= oe:
+                    # Another speaker overlaps our start — recover a bounded bit
+                    # backward to catch our leading words (symmetric with the end
+                    # side; the silence loop below still halts us at a real pause).
+                    limit = max(limit, st - overlap_extend_sec)
             # Stop at the last silence that ends before `st`.
             for a, b in reversed(sil):
                 if b < st:
