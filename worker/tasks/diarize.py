@@ -37,7 +37,7 @@ from typing import Any
 from worker.db import get_db
 from worker.state import progress, transition
 from worker.utils.storage import download_file, upload_file
-from shared.constants import JobStatus, r2_key_transcript
+from shared.constants import JobStatus, r2_key_diarization, r2_key_transcript
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,15 @@ PAD_SEC = 0.5          # pad each segment start/end by this many seconds
 # large-v3 recognises proper nouns / multilingual (Hinglish) speech notably
 # better than large-v2, at the same model size (no extra VRAM).
 WHISPER_MODEL = "large-v3"
+
+# Transcription language is PINNED, not auto-detected. Whisper's per-file
+# detection is unstable on Hindi/Urdu speech (same spoken language): job
+# bc5ce57c flipped to "ur" and the entire transcript came out in Urdu
+# (Arabic) script, while earlier jobs of the same show came out as the
+# Latin-script romanized Hinglish the product wants ("Titan ko yahan buy
+# karna hai"). Pinning "en" reproduces that romanized-Hinglish output
+# deterministically and keeps the (proven) English wav2vec2 align model.
+WHISPER_LANGUAGE = "en"
 
 # WhisperX runs an internal VAD (voice-activity detector) that gates the audio
 # BEFORE Whisper transcribes it — audio the VAD misses is never transcribed and
@@ -144,6 +153,7 @@ def run_diarization(
     try:
         model = whisperx.load_model(
             WHISPER_MODEL, device, compute_type=compute_type,
+            language=WHISPER_LANGUAGE,
             vad_method="pyannote", vad_options=dict(VAD_OPTIONS),
         )
         result = model.transcribe(audio, batch_size=16)
@@ -153,6 +163,10 @@ def run_diarization(
             f"Whisper transcription failed: {exc}",
         ) from exc
 
+    logger.info(
+        "diarize[%s] transcription language=%s (pinned=%s)",
+        job_id, result.get("language"), WHISPER_LANGUAGE,
+    )
     progress(job_id, percent=35.0, message="Transcription complete")
     _free(model, torch=torch, device=device)
 
@@ -177,6 +191,7 @@ def run_diarization(
 
     # ---- 5. Speaker diarization (pyannote via whisperx wrapper) ---------
     progress(job_id, percent=60.0, message="Identifying speakers...")
+    raw_turns: list[dict[str, Any]] = []
     try:
         DiarizationPipeline = (
             whisperx.DiarizationPipeline
@@ -194,6 +209,7 @@ def run_diarization(
             else whisperx.diarize.assign_word_speakers
         )
         result = assign_fn(diarize_segments, result)
+        raw_turns = _extract_diarization_turns(diarize_segments)
         _free(diarize_model, torch=torch, device=device)
         del diarize_segments
     except Exception as exc:  # noqa: BLE001
@@ -261,6 +277,33 @@ def run_diarization(
         logger.warning(
             "diarize[%s] transcript persist failed (%s); continuing — the "
             "video is unaffected, the transcript just won't be available",
+            job_id, exc,
+        )
+
+    # ---- 9c. Persist RAW diarization turns (debug artifact) -------------
+    # Attribution errors (a speaker's words landing under another label —
+    # job bc5ce57c's Titan turn) can only be diagnosed after the fact if
+    # the pre-assignment turns are kept. Best-effort: never fails the job;
+    # the video pipeline never reads this file.
+    try:
+        if raw_turns:
+            diar_path = job_dir / "diarization.json"
+            diar_path.write_text(
+                json.dumps(raw_turns, ensure_ascii=False), encoding="utf-8",
+            )
+            diar_key = r2_key_diarization(job_id)
+            upload_file(str(diar_path), diar_key)
+            db.jobs.update_one(
+                {"job_id": job_id},
+                {"$set": {"artifacts.diarization_key": diar_key}},
+            )
+            logger.info(
+                "diarize[%s] raw diarization turns saved: %d -> %s",
+                job_id, len(raw_turns), diar_key,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "diarize[%s] diarization.json persist failed (%s); continuing",
             job_id, exc,
         )
 
@@ -338,6 +381,33 @@ def build_transcript(whisperx_result: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     out.sort(key=lambda s: s["start"])
+    return out
+
+
+def _extract_diarization_turns(diarize_segments: Any) -> list[dict[str, Any]]:
+    """
+    Flatten whisperx's diarization DataFrame (columns: segment, label,
+    speaker, start, end) into plain {speaker, start, end} dicts sorted by
+    start. Defensive: returns [] on any unexpected shape — this only feeds
+    a debug artifact and must never break the pipeline.
+    """
+    try:
+        rows = diarize_segments.to_dict("records")
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            out.append(
+                {
+                    "speaker": str(r["speaker"]),
+                    "start": float(r["start"]),
+                    "end": float(r["end"]),
+                }
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    out.sort(key=lambda t: t["start"])
     return out
 
 

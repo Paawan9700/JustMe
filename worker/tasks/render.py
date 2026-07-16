@@ -10,6 +10,9 @@ Pipeline (matches the M6 spec):
   1. Transition to RENDERING (0%, "Preparing your video segments...").
   2. Pull job: selected_speaker, artifacts.source_video_key.
      Pull segments where speaker == selected_speaker, sorted by start.
+  2b. Voice-print reclamation (worker/tasks/reclaim.py): re-verify every
+     other-speaker span against the selected speaker's voice embedding and
+     pull back turns diarization mislabeled. Additive-only, best-effort.
   3. Final merge pass on the segments (gap < 2.0s -> merge), giving
      the cut list of (start, end) pairs.
   4. Download source.mp4 from R2 to job_dir. Progress 20%.
@@ -181,6 +184,44 @@ def run_render(job_id: str, job_dir: Path) -> None:
             "silence-aware extension", job_id, exc,
         )
         silences = []
+
+    # Reclaim mislabeled turns BEFORE building the cut list: diarization
+    # sometimes assigns a turn of the selected speaker to another speaker's
+    # cluster (job bc5ce57c lost the analyst's Titan numbers this way), and
+    # no timing heuristic downstream can recover that. Voice-embedding
+    # verification re-checks every other-speaker span against the selected
+    # speaker's voice-print and returns the ranges that are really theirs.
+    # Strictly additive and best-effort: on any failure the render proceeds
+    # with the original labels, exactly as before.
+    progress(job_id, percent=17.0, message="Verifying speaker attribution...")
+    # Imported here, not at module top: importing via the worker.tasks
+    # package runs its __init__ (Celery autodiscovery), which drags in the
+    # full task chain (ingest -> yt_dlp) that dev/test venvs don't have.
+    from worker.tasks.reclaim import reclaim_for_render, subtract_ranges
+
+    reclaimed: list[dict[str, Any]] = []
+    try:
+        reclaimed = reclaim_for_render(
+            job_id, local_source, job_dir, selected, all_segments,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "render[%s] attribution reclaim failed (%s); rendering with "
+            "original labels", job_id, exc,
+        )
+    if reclaimed:
+        raw_segments = sorted(
+            raw_segments + [{"start": r["start"], "end": r["end"]} for r in reclaimed],
+            key=lambda s: float(s["start"]),
+        )
+        # Reclaimed spans are the selected speaker's own speech — they must
+        # no longer count as "another speaker" when extending/bridging.
+        other_segments = subtract_ranges(other_segments, reclaimed)
+        logger.info(
+            "render[%s] attribution reclaim recovered %d range(s) "
+            "totaling %.1fs", job_id, len(reclaimed),
+            sum(r["end"] - r["start"] for r in reclaimed),
+        )
 
     # Build the cut list: pad -> silence-aware extend -> merge -> bridge.
     # Padding catches words tight against boundaries; the silence-aware

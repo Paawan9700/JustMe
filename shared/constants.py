@@ -82,6 +82,7 @@ def is_legal_transition(current: str, new: str) -> bool:
 #   jobs/{job_id}/snippets/{speaker_label}.mp3
 #   jobs/{job_id}/final.mp4
 #   jobs/{job_id}/transcript.json     (structured, all segments — Phase-2 source)
+#   jobs/{job_id}/diarization.json    (raw pyannote turns — debug/attribution)
 #   jobs/{job_id}/transcription.txt   (plain-text transcript of the final video)
 #   jobs/{job_id}/recommendations.csv (LLM-extracted stock recommendations)
 # ---------------------------------------------------------------------------
@@ -120,6 +121,20 @@ def r2_key_transcript(job_id: str) -> str:
     fuel for Phase-2 (LLM insights).
     """
     return f"jobs/{job_id}/transcript.json"
+
+
+def r2_key_diarization(job_id: str) -> str:
+    """
+    Raw pyannote speaker turns as produced by the diarization pipeline,
+    BEFORE whisperx word-assignment and post-processing: a flat list of
+    {speaker, start, end} dicts sorted by start.
+
+    Written at diarize time purely for observability: when a speaker's
+    words end up under the wrong label (attribution error), this is the
+    artifact that shows whether clustering or assignment was at fault.
+    The video pipeline never reads it.
+    """
+    return f"jobs/{job_id}/diarization.json"
 
 
 def r2_key_transcription(job_id: str) -> str:

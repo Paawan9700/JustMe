@@ -64,6 +64,44 @@ def test_whisper_model_unchanged():
     assert diarize.WHISPER_MODEL == "large-v3"
 
 
+def test_language_pinned_to_english():
+    # Auto-detection flipped to "ur" on job bc5ce57c and the whole
+    # transcript came out in Urdu script. Pinning "en" reproduces the
+    # romanized-Hinglish output of the known-good jobs deterministically.
+    assert diarize.WHISPER_LANGUAGE == "en"
+
+
+class _FakeDiarizeDF:
+    """Duck-type of the whisperx diarization DataFrame (to_dict only)."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def to_dict(self, orient):
+        assert orient == "records"
+        return self._rows
+
+
+def test_extract_diarization_turns_flattens_and_sorts():
+    df = _FakeDiarizeDF([
+        {"segment": object(), "label": "B", "speaker": "SPEAKER_01",
+         "start": 5.0, "end": 7.5},
+        {"segment": object(), "label": "A", "speaker": "SPEAKER_00",
+         "start": 1.0, "end": 4.0},
+        {"speaker": "SPEAKER_02", "start": "bad", "end": 9.0},  # skipped
+    ])
+    turns = diarize._extract_diarization_turns(df)
+    assert turns == [
+        {"speaker": "SPEAKER_00", "start": 1.0, "end": 4.0},
+        {"speaker": "SPEAKER_01", "start": 5.0, "end": 7.5},
+    ]
+
+
+def test_extract_diarization_turns_tolerates_garbage():
+    assert diarize._extract_diarization_turns(object()) == []
+    assert diarize._extract_diarization_turns(None) == []
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
