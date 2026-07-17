@@ -16,7 +16,7 @@ const STEPS = [
   { icon: Link2, title: "Paste a link", body: "Drop any long YouTube video." },
   { icon: Mic, title: "We find the voices", body: "AI diarization separates every speaker." },
   { icon: Scissors, title: "Pick yourself", body: "Keep only your speaking moments." },
-  { icon: TrendingUp, title: "Get insights", body: "Turn your words into stock signals." },
+  { icon: TrendingUp, title: "Get insights", body: "Turn your words into stock insights." },
 ];
 
 export default function Home() {
@@ -52,7 +52,7 @@ export default function Home() {
       >
         <span className="mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3.5 py-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-slate-400">
           <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-          Voice extraction · stock intelligence
+          Voice extraction · AI Intelligence
         </span>
 
         <h1
@@ -60,9 +60,7 @@ export default function Home() {
           data-testid="home-title"
         >
           Just the parts where{" "}
-          <span className="bg-gradient-to-r from-accent-soft via-accent to-accent-blue bg-clip-text text-transparent">
-            you spoke.
-          </span>
+          <span className="text-grad-animate">you spoke.</span>
         </h1>
 
         <p
@@ -159,7 +157,8 @@ export default function Home() {
                 hidden: { opacity: 0, y: 16 },
                 show: { opacity: 1, y: 0 },
               }}
-              className="glass group p-5 transition-colors duration-300 hover:border-white/15"
+              whileHover={{ y: -4 }}
+              className="glass group p-5 transition-all duration-300 hover:border-accent/25 hover:shadow-glow-accent"
             >
               <div className="mb-4 flex items-center justify-between">
                 <span className="grid h-10 w-10 place-items-center rounded-xl border border-white/10 bg-white/[0.03] text-accent-soft transition-colors duration-300 group-hover:border-accent/40 group-hover:bg-accent/10">

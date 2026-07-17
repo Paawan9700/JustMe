@@ -1,6 +1,6 @@
-import React, { useRef } from "react";
+import React, { useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Check, Loader2, AudioLines, Clock, Hash } from "lucide-react";
+import { Check, Loader2, AudioLines, Clock, Hash, Play, Pause } from "lucide-react";
 
 /**
  * One speaker option in the AWAITING_SELECTION state.
@@ -36,6 +36,20 @@ export default function SpeakerCard({
     frozenSrcRef.current = snippet_url;
   }
   const audioSrc = frozenSrcRef.current;
+
+  // Custom player: a hidden <audio> driven by a play/pause button, with a
+  // decorative equalizer that dances while the sample plays. isPlaying is
+  // sourced from the element's own events so it stays in sync no matter how
+  // playback ends (natural end, pause, another element stealing focus).
+  const audioRef = useRef(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  function togglePlay() {
+    const el = audioRef.current;
+    if (!el) return;
+    if (el.paused) el.play().catch(() => {});
+    else el.pause();
+  }
 
   return (
     <motion.div
@@ -79,14 +93,50 @@ export default function SpeakerCard({
         </div>
       </div>
 
-      <div className="rounded-xl border border-white/[0.06] bg-ink-950/60 p-2.5">
+      <div className="rounded-xl border border-white/[0.06] bg-ink-950/60 p-3">
         {audioSrc ? (
-          <audio
-            controls
-            preload="metadata"
-            src={audioSrc}
-            data-testid={`speaker-audio-${label}`}
-          />
+          <div
+            className="flex items-center gap-3"
+            data-testid={`speaker-player-${label}`}
+          >
+            <button
+              type="button"
+              onClick={togglePlay}
+              className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-accent-grad text-white shadow-glow-accent transition-transform duration-200 hover:scale-105 active:scale-95"
+              aria-label={isPlaying ? "Pause voice sample" : "Play voice sample"}
+              data-testid={`speaker-play-btn-${label}`}
+            >
+              {isPlaying ? (
+                <Pause className="h-4 w-4" />
+              ) : (
+                <Play className="h-4 w-4 translate-x-px" />
+              )}
+            </button>
+            <div
+              className={`eq flex-1 ${isPlaying ? "eq-playing" : ""}`}
+              aria-hidden="true"
+            >
+              {Array.from({ length: 28 }).map((_, i) => (
+                <span
+                  key={i}
+                  style={{
+                    animationDelay: `${(i % 6) * 80}ms`,
+                    animationDuration: `${640 + (i % 5) * 120}ms`,
+                  }}
+                />
+              ))}
+            </div>
+            <audio
+              ref={audioRef}
+              preload="metadata"
+              src={audioSrc}
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+              onEnded={() => setIsPlaying(false)}
+              className="hidden"
+              data-testid={`speaker-audio-${label}`}
+            />
+          </div>
         ) : (
           <p
             className="rounded-lg border border-dashed border-white/10 px-3 py-2.5 text-center font-mono text-xs text-slate-600"

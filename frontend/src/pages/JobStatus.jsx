@@ -473,13 +473,17 @@ function Rendering({ job }) {
 /* State D — Done                                                       */
 /* --------------------------------------------------------------------- */
 function Done({ job, onGenerate, generating, genError }) {
-  const stats = buildDoneStats(job);
+  const tiles = buildDoneTiles(job);
   return (
     <div className="flex flex-col gap-6" data-testid="state-done">
       <div className="glass overflow-hidden p-7 sm:p-9">
         <div className="flex items-start gap-4">
-          <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-bull/30 bg-bull/10 shadow-glow-bull">
-            <CheckCircle2 className="h-6 w-6 text-bull" />
+          <span className="relative grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-bull/30 bg-bull/10 shadow-glow-bull">
+            <span
+              className="animate-ping-slow absolute inset-0 rounded-2xl bg-bull/20"
+              aria-hidden="true"
+            />
+            <CheckCircle2 className="relative h-6 w-6 text-bull" />
           </span>
           <div className="flex-1">
             <h2
@@ -488,13 +492,30 @@ function Done({ job, onGenerate, generating, genError }) {
             >
               Your video is ready! 🎉
             </h2>
-            {stats && (
-              <p className="mt-2 font-mono text-sm text-slate-400" data-testid="done-stats">
-                {stats}
-              </p>
-            )}
+            <p className="mt-1.5 text-sm leading-relaxed text-slate-400">
+              Only your speaking moments, stitched into one clean cut.
+            </p>
           </div>
         </div>
+
+        {tiles.length > 0 && (
+          <div
+            className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3"
+            data-testid="done-stats"
+          >
+            {tiles.map((t) => (
+              <div
+                key={t.label}
+                className="rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3"
+              >
+                <p className="text-xl font-bold tracking-tight text-white tabular-nums">
+                  {t.value}
+                </p>
+                <p className="label-mono mt-0.5">{t.label}</p>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="mt-7 flex flex-wrap gap-3">
           {job.download_url ? (
@@ -516,7 +537,7 @@ function Done({ job, onGenerate, generating, genError }) {
               data-testid="download-pending"
             >
               <Clock className="h-4 w-4" />
-              Download link will appear once the real renderer is wired (M6)
+              Your download link will appear here shortly…
             </span>
           )}
 
@@ -557,23 +578,29 @@ function Done({ job, onGenerate, generating, genError }) {
   );
 }
 
-function buildDoneStats(job) {
+function buildDoneTiles(job) {
   const sp = (job.speakers || []).find((s) => s.label === job.selected_speaker);
+  const tiles = [];
+
   const spokeSec = sp?.total_speaking_sec || 0;
-  const sourceSec = job.duration_sec || 0;
-
-  if (spokeSec <= 0 && sourceSec <= 0) return null;
-
-  const parts = [];
   if (spokeSec > 0) {
-    const spokeMin = Math.round(spokeSec / 60);
-    parts.push(`Extracted ${spokeMin} minute${spokeMin === 1 ? "" : "s"} of your speaking`);
+    const value =
+      spokeSec < 60
+        ? `${Math.max(1, Math.round(spokeSec))}s`
+        : `${Math.round(spokeSec / 60)} min`;
+    tiles.push({ label: "Your speaking", value });
   }
+
+  const sourceSec = job.duration_sec || 0;
   if (sourceSec > 0) {
     const hrs = (sourceSec / 3600).toFixed(1).replace(/\.0$/, "");
-    parts.push(`from a ${hrs}-hour video`);
+    tiles.push({ label: "Source video", value: `${hrs} hr` });
   }
-  return parts.join(" ");
+
+  const segs = sp?.segment_count || 0;
+  if (segs > 0) tiles.push({ label: "Segments", value: String(segs) });
+
+  return tiles;
 }
 
 /* --------------------------------------------------------------------- */
@@ -610,7 +637,7 @@ function Recommendations({ job, onGenerate, generating, genError }) {
             </span>
             <div>
               <h3 className="text-2xl font-bold tracking-tight text-white">
-                Alpha Engine
+                AI Intelligence Engine
               </h3>
             </div>
           </div>
@@ -628,9 +655,8 @@ function Recommendations({ job, onGenerate, generating, genError }) {
           )}
         </div>
 
-        <p className="mt-4 max-w-lg text-sm leading-relaxed text-slate-400">
-          Get stock insights from our advanced AI intelligence based on what you
-          have spoken.
+        <p className="mt-4 max-w-2xl text-sm leading-relaxed text-slate-400">
+          Get stock insights from our advanced AI Intelligence based on what you have spoken.
         </p>
 
         <div className="mt-6">
@@ -665,15 +691,15 @@ function Recommendations({ job, onGenerate, generating, genError }) {
               className="recs-generating flex items-center gap-3"
               data-testid="recommendations-generating"
             >
-              <Loader2 className="h-5 w-5 animate-spin text-accent-soft" />
-              <div>
-                <p className="neural-text text-sm font-semibold">
-                  Neural engine analysing your transcript…
-                </p>
-                <p className="mt-0.5 font-mono text-[11px] text-slate-500">
-                  Surfacing tickers &amp; themes — this can take a moment.
-                </p>
-              </div>
+              <span className="neural-dots" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+                <span />
+              </span>
+              <p className="neural-text text-base font-semibold">
+                Analysing your words
+              </p>
             </div>
           ) : (
             <div className="recs-block flex flex-col items-start gap-3" data-testid="recommendations-idle">

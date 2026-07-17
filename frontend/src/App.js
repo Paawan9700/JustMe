@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { Routes, Route, Link } from "react-router-dom";
+import { Routes, Route, Link, NavLink } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
-import { AudioLines, ListChecks } from "lucide-react";
+import { AudioLines, Film } from "lucide-react";
 import Home from "./pages/Home";
 import JobStatus from "./pages/JobStatus";
 import MyJobs from "./pages/MyJobs";
@@ -59,14 +59,20 @@ export default function App() {
           </Link>
 
           <div className="flex items-center gap-3">
-            <Link
+            <NavLink
               to="/jobs"
-              className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-mono text-[11px] font-medium text-slate-300 no-underline transition-colors hover:text-white"
+              className={({ isActive }) =>
+                `inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 font-mono text-[11px] font-medium no-underline transition-all duration-200 ${
+                  isActive
+                    ? "border-accent/40 bg-accent/10 text-white shadow-glow-accent"
+                    : "border-white/10 bg-white/[0.03] text-slate-300 hover:border-accent/40 hover:bg-accent/10 hover:text-white hover:shadow-glow-accent"
+                }`
+              }
               data-testid="nav-myjobs-link"
             >
-              <ListChecks className="h-3.5 w-3.5" />
-              My Jobs
-            </Link>
+              <Film className="h-3.5 w-3.5" />
+              My Videos
+            </NavLink>
             <PitchChip />
           </div>
         </div>
@@ -97,7 +103,7 @@ export default function App() {
 
       <footer className="mt-auto border-t border-white/[0.05] py-6">
         <p className="text-center font-mono text-[11px] text-slate-700">
-          Alphavox — your words, your edit, your edge.
+          Alphavox — your words, your edit, your insight.
         </p>
       </footer>
     </div>

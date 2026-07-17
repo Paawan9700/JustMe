@@ -63,22 +63,87 @@ function toUtcDate(iso) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-// Small relative-time helper — no date library needed.
-function timeAgo(iso) {
+// Absolute processed-at timestamp, always rendered in IST (Asia/Kolkata) so it
+// reads the same for every viewer regardless of their own timezone. The
+// `short` style powers the inline label; `full` (weekday + full month) powers
+// the hover tooltip.
+function formatProcessedIST(iso, style = "short") {
   const d = toUtcDate(iso);
   if (!d) return "";
-  const secs = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
-  if (secs < 60) return "just now";
-  const mins = Math.round(secs / 60);
-  if (mins < 60) return `${mins} min${mins === 1 ? "" : "s"} ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
-  const days = Math.round(hours / 24);
-  return `${days} day${days === 1 ? "" : "s"} ago`;
+  const base =
+    style === "full"
+      ? {
+          weekday: "long",
+          day: "numeric",
+          month: "long",
+          year: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        }
+      : {
+          day: "numeric",
+          month: "short",
+          year: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        };
+  return (
+    d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata", ...base }) + " IST"
+  );
 }
 
 function jobTitle(job) {
   return job.video_title || job.youtube_url || job.job_id;
+}
+
+// ---- day grouping -----------------------------------------------------
+// Bucket jobs into per-day sections keyed by IST calendar date, so the Library
+// reads as tidy dated groups instead of one long flat list.
+
+// IST calendar-day key (YYYY-MM-DD via en-CA) — stable to compare.
+function istDayKey(iso) {
+  const d = toUtcDate(iso);
+  if (!d) return "unknown";
+  return d.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+}
+
+// Section heading — date only, with a friendly Today/Yesterday prefix (still
+// IST-anchored) when it applies.
+function dayHeading(iso) {
+  const d = toUtcDate(iso);
+  if (!d) return "Unknown date";
+  const date = d.toLocaleDateString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+  const key = istDayKey(iso);
+  const today = istDayKey(new Date().toISOString());
+  const yesterday = istDayKey(new Date(Date.now() - 86400000).toISOString());
+  if (key === today) return `Today · ${date}`;
+  if (key === yesterday) return `Yesterday · ${date}`;
+  return date;
+}
+
+// Preserves input order (the API returns newest-first), so groups come out
+// newest-day-first and rows stay newest-first within each day.
+function groupJobsByDay(jobs) {
+  const groups = [];
+  const byKey = new Map();
+  for (const job of jobs) {
+    const key = istDayKey(job.created_at);
+    let group = byKey.get(key);
+    if (!group) {
+      group = { key, sampleIso: job.created_at, jobs: [] };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.jobs.push(job);
+  }
+  return groups;
 }
 
 export default function MyJobs() {
@@ -124,7 +189,7 @@ export default function MyJobs() {
         data-testid="myjobs-loading"
       >
         <Loader2 className="h-7 w-7 animate-spin text-accent-soft" />
-        <span className="font-mono text-sm">Loading your jobs…</span>
+        <span className="font-mono text-sm">Loading your videos…</span>
       </div>
     );
   }
@@ -137,7 +202,7 @@ export default function MyJobs() {
           <span className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-2xl border border-bear/30 bg-bear/10">
             <AlertTriangle className="h-7 w-7 text-bear" />
           </span>
-          <h2 className="text-2xl font-bold text-white">Couldn&rsquo;t load your jobs</h2>
+          <h2 className="text-2xl font-bold text-white">Couldn&rsquo;t load your videos</h2>
           <p className="mt-3 text-slate-400">{loadError.message}</p>
           <button type="button" className="btn-ghost mx-auto mt-6" onClick={load}>
             <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
@@ -157,10 +222,10 @@ export default function MyJobs() {
         <div>
           <span className="label-mono flex items-center gap-2">
             <ListChecks className="h-4 w-4" />
-            My Jobs
+            Library
           </span>
           <h1 className="mt-2 text-2xl font-bold tracking-tight text-white sm:text-3xl">
-            Your videos
+            Your Videos
           </h1>
         </div>
         <button
@@ -181,7 +246,7 @@ export default function MyJobs() {
           <span className="mx-auto mb-5 grid h-14 w-14 place-items-center rounded-2xl border border-white/10 bg-white/5">
             <ListChecks className="h-7 w-7 text-slate-400" />
           </span>
-          <h2 className="text-2xl font-bold text-white">No jobs yet</h2>
+          <h2 className="text-2xl font-bold text-white">No videos yet</h2>
           <p className="mt-3 text-slate-400">
             Submit a YouTube video and it&rsquo;ll show up here so you can come back anytime.
           </p>
@@ -191,63 +256,78 @@ export default function MyJobs() {
           </Link>
         </div>
       ) : (
-        <ul className="grid gap-3" data-testid="myjobs-list">
-          {jobs &&
-            jobs.map((job, i) => {
-              const awaiting = job.status === "AWAITING_SELECTION";
-              const processing = PROCESSING_STATES.has(job.status);
-              return (
-                <motion.li
-                  key={job.job_id}
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.3, delay: Math.min(i * 0.03, 0.3), ease: [0.22, 1, 0.36, 1] }}
-                >
-                  <Link
-                    to={`/jobs/${job.job_id}`}
-                    className={`glass block p-5 no-underline transition-colors hover:border-white/15 ${
-                      awaiting ? "border-accent/40 shadow-glow-accent" : ""
-                    }`}
-                    data-testid="myjobs-row"
-                  >
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="min-w-0">
-                        <p
-                          className="truncate text-base font-semibold text-white"
-                          title={jobTitle(job)}
-                        >
-                          {jobTitle(job)}
-                        </p>
-                        <p
-                          className="mt-1 font-mono text-xs text-slate-500"
-                          title={toUtcDate(job.created_at)?.toLocaleString() || ""}
-                        >
-                          {timeAgo(job.created_at)}
-                        </p>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-3">
-                        <StatusBadge status={job.status} />
-                        <ChevronRight className="h-4 w-4 text-slate-600" />
-                      </div>
-                    </div>
+        <div className="flex flex-col gap-7" data-testid="myjobs-list">
+          {groupJobsByDay(jobs || []).map((group) => (
+            <section key={group.key} data-testid="myjobs-day-group">
+              {/* date-only heading with a hairline rule + count */}
+              <div className="mb-3 flex items-center gap-3 px-1">
+                <h2 className="label-mono shrink-0">{dayHeading(group.sampleIso)}</h2>
+                <span className="h-px flex-1 bg-white/[0.06]" />
+                <span className="shrink-0 font-mono text-[11px] text-slate-600">
+                  {group.jobs.length} video{group.jobs.length === 1 ? "" : "s"}
+                </span>
+              </div>
 
-                    {processing && (
-                      <div className="mt-4">
-                        <ProgressBar percent={job.progress_percent || 0} testId="myjobs-progress" />
-                      </div>
-                    )}
+              {/* the day's videos, enclosed in a soft boundary box */}
+              <ul className="grid gap-3 rounded-2xl border border-white/[0.05] bg-white/[0.015] p-3 sm:p-4">
+                {group.jobs.map((job, i) => {
+                  const awaiting = job.status === "AWAITING_SELECTION";
+                  const processing = PROCESSING_STATES.has(job.status);
+                  return (
+                    <motion.li
+                      key={job.job_id}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.3, delay: Math.min(i * 0.03, 0.3), ease: [0.22, 1, 0.36, 1] }}
+                    >
+                      <Link
+                        to={`/jobs/${job.job_id}`}
+                        className={`glass block p-5 no-underline transition-colors hover:border-white/15 ${
+                          awaiting ? "border-accent/40 shadow-glow-accent" : ""
+                        }`}
+                        data-testid="myjobs-row"
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0">
+                            <p
+                              className="truncate text-base font-semibold text-white"
+                              title={jobTitle(job)}
+                            >
+                              {jobTitle(job)}
+                            </p>
+                            <p
+                              className="mt-1 font-mono text-xs text-slate-500"
+                              title={formatProcessedIST(job.created_at, "full")}
+                            >
+                              {formatProcessedIST(job.created_at)}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-3">
+                            <StatusBadge status={job.status} />
+                            <ChevronRight className="h-4 w-4 text-slate-600" />
+                          </div>
+                        </div>
 
-                    {awaiting && (
-                      <div className="mt-4 flex items-center gap-2 text-sm font-medium text-accent-soft">
-                        <Mic className="h-4 w-4" />
-                        Waiting for you to select your voice — click to choose your speaker
-                      </div>
-                    )}
-                  </Link>
-                </motion.li>
-              );
-            })}
-        </ul>
+                        {processing && (
+                          <div className="mt-4">
+                            <ProgressBar percent={job.progress_percent || 0} testId="myjobs-progress" />
+                          </div>
+                        )}
+
+                        {awaiting && (
+                          <div className="mt-4 flex items-center gap-2 text-sm font-medium text-accent-soft">
+                            <Mic className="h-4 w-4" />
+                            Waiting for you to select your voice — click to choose your speaker
+                          </div>
+                        )}
+                      </Link>
+                    </motion.li>
+                  );
+                })}
+              </ul>
+            </section>
+          ))}
+        </div>
       )}
 
       {/* Non-fatal refresh error (list already shown) */}
