@@ -144,48 +144,99 @@ EOF
 >   to git), rotate them in the source provider AND re-run
 >   `modal secret create justme-secrets ...` to update Modal.
 
-### 3. Deploy AND start
+> `REDIS_URL` in the secret is only needed by the **legacy fallback**
+> (`run_worker`) — the primary on-demand path doesn't use Redis at all.
+
+### 3. Deploy (one-time — there is nothing to "start")
 
 From the **project root** (so `modal_app.py` can see both `worker/`
 and `shared/`):
 
 ```bash
 modal deploy worker/modal_app.py
-modal run --detach worker/modal_app.py::run_worker
 ```
 
-> **Both commands are required.** `modal deploy` only registers the
-> function — it does not invoke it. `modal run --detach` is what
-> actually starts the long-running Celery worker process. With
-> `retries=10` configured in `modal_app.py`, Modal will auto-restart
-> the worker when the 24h outer timeout fires (or if it crashes), so
-> the worker stays alive without further intervention.
+That's the whole worker deployment. It registers four functions
+(`process_video`, `render_video`, `seed_cache`, legacy `run_worker`)
+and creates the `justme-hf-cache` model volume. A deployed app with no
+running containers costs **$0**, so the deployment stays live 24/7 —
+do **not** run `modal run --detach` anymore. The API spawns a container
+per job and it scales back to zero ~1 min after finishing.
 
-You'll see the build run once (apt → pip → whisperx). After
-`modal run --detach`, the command returns a function-call ID and the
-worker is running in the background, consuming the Redis queue.
+You'll see the image build once (apt → pip → whisperx). Re-deploy only
+when worker code changes — it takes seconds, because `worker/` and
+`shared/` are attached at container start and the image layers stay
+cached unless requirements or the base image changed.
 
-### 4. Test it
+### 4. Point the backend at Modal (one-time)
+
+The API dispatches jobs by spawning the deployed functions directly,
+so it needs its own Modal API token:
+
+1. Modal dashboard → **Settings → API Tokens** → create a token
+   (dedicated to the server — don't reuse your laptop's
+   `~/.modal.toml` pair, so you can revoke them independently).
+2. In `backend/.env` (and on the hosted backend):
+
+   ```bash
+   MODAL_TOKEN_ID=ak-...
+   MODAL_TOKEN_SECRET=as-...
+   # QUEUE_BACKEND=modal   # default; set to "celery" only for the legacy fallback
+   ```
+
+3. `pip install -r backend/requirements.txt` (now includes `modal`)
+   and restart the backend.
+
+### 5. Seed the model cache (recommended, one-time)
+
+```bash
+modal run worker/modal_app.py
+```
+
+Runs `seed_cache` on a GPU for ~5 min (≈ $0.12): downloads Whisper
+large-v3, the align model, pyannote diarization and the reclaim
+embedder into the `justme-hf-cache` volume, and live-verifies your
+`HF_TOKEN` + both gated pyannote licenses. Afterwards cold starts read
+models from the volume (~30–60s) instead of re-downloading several GB
+from HuggingFace.
+
+### 6. Test it
 
 Submit a real video via your deployed frontend (or `curl POST
 /api/jobs`) and watch Modal's dashboard:
 
-- <https://modal.com/apps> → `justme-worker` → "Run history"
+- <https://modal.com/apps> → `justme-worker`: a `process_video`
+  container appears when the job is submitted, a `render_video`
+  container after you pick your voice — and both scale to zero about a
+  minute after finishing. Idle = $0.
 - Logs in real-time: `modal app logs justme-worker`
-- Stop the worker (e.g. before a fresh deploy):
-  `modal app stop justme-worker`
 
-### 5. Scale tweaks
+### 7. Scale tweaks
 
-Edit `worker/modal_app.py`:
+Edit `worker/modal_app.py` and re-run `modal deploy`:
 
-| Want                        | Change in `@app.function(...)`                |
-|-----------------------------|------------------------------------------------|
-| Scale to zero off-hours     | `keep_warm=0` (cold-start adds ~30s on first job) |
-| Faster GPU (paid more)      | `gpu="A100"` instead of `"A10G"`               |
-| More RAM for long videos    | `memory=32768`                                  |
+| Want                          | Change                                            |
+|-------------------------------|----------------------------------------------------|
+| More parallel jobs            | `max_containers=4` (each busy container ≈ $1.4/h) |
+| Cheaper GPU (slower diarize)  | `gpu="T4"` (~46% cheaper, ~2× slower)             |
+| Faster GPU (paid more)        | `gpu="A100"` instead of `"A10G"`                  |
+| More RAM for long videos      | `memory=32768`                                     |
+| Longer per-job time limit     | `TASK_SOFT_TIME_LIMIT` / `TASK_TIME_LIMIT` consts |
 
-Re-run `modal deploy worker/modal_app.py` after any change.
+### 8. Legacy fallback (resident Celery worker)
+
+If the on-demand path ever misbehaves, roll back with zero code
+changes:
+
+```bash
+# backend: set QUEUE_BACKEND=celery and restart it, then:
+modal run --detach worker/modal_app.py::run_worker   # starts the resident worker
+modal app logs justme-worker                          # celery banner = alive
+modal app stop justme-worker                          # stop it when done — it bills the GPU continuously!
+```
+
+`run_worker` consumes the Upstash Redis queue exactly like the
+pre-migration setup (`REDIS_URL` must be present in `justme-secrets`).
 
 ---
 
@@ -256,7 +307,10 @@ worker automatically.
 |------------------------|---------------------|----------------------------------------------------------------|
 | `MONGO_URL`            | API + worker        | `mongodb+srv://user:pass@cluster.mongodb.net`                  |
 | `DB_NAME`              | API + worker        | `justme`                                                       |
-| `REDIS_URL`            | API + worker        | `rediss://default:TOKEN@host.upstash.io:6379` (TLS!)           |
+| `REDIS_URL`            | legacy Celery fallback only | `rediss://default:TOKEN@host.upstash.io:6379` (TLS!)   |
+| `MODAL_TOKEN_ID`       | API                 | `ak-...` — lets the API spawn the deployed Modal functions      |
+| `MODAL_TOKEN_SECRET`   | API                 | `as-...`                                                        |
+| `QUEUE_BACKEND`        | API                 | `modal` (default) or `celery` (legacy fallback)                 |
 | `R2_ACCESS_KEY_ID`     | API + worker        | from Cloudflare dashboard                                      |
 | `R2_SECRET_ACCESS_KEY` | API + worker        | from Cloudflare dashboard                                      |
 | `R2_BUCKET_NAME`       | API + worker        | `justme-r2bucket`                                              |
@@ -318,8 +372,10 @@ Common one-time fixes:
   `pyannote/segmentation-3.0` license too.
 - **DOWNLOAD_FAILED with 403**: your GPU box's IP got rate-limited by
   YouTube; use a different region/pool or supply `--cookies` (advanced).
-- **TIMEOUT**: video is just very long; bump `task_soft_time_limit` in
-  `worker/celery_app.py` if 2 hours genuinely isn't enough.
+- **TIMEOUT**: video is just very long; bump `TASK_SOFT_TIME_LIMIT` /
+  `TASK_TIME_LIMIT` in `worker/modal_app.py` (and, for the Celery
+  fallback, `task_soft_time_limit` in `worker/celery_app.py`) if 2
+  hours genuinely isn't enough.
 
 ---
 
@@ -327,7 +383,7 @@ Common one-time fixes:
 
 | Symptom                                  | Likely cause                                                  | Fix                                                       |
 |------------------------------------------|---------------------------------------------------------------|-----------------------------------------------------------|
-| Job stuck in `QUEUED`                    | Worker not running OR Redis URL mismatch between API & worker | Modal: `modal app logs justme-worker` · RunPod: pod Logs   |
+| Job stuck in `QUEUED`                    | Backend Modal token missing/invalid, app not deployed, or both containers busy (`max_containers`) | Check the job's `error.code` (`ENQUEUE_FAILED` shows the spawn error verbatim) and `modal app logs justme-worker`. Celery fallback: worker not running / Redis URL mismatch |
 | `MISSING_DEPS` in `error.code`           | The container doesn't have whisperx (CPU/dev box)             | Use the production Dockerfile / Modal image               |
 | `HF_ACCESS_DENIED`                       | Pyannote license not accepted                                 | See "HuggingFace setup" above — both models               |
 | Snippets play but final.mp4 is silent    | Stream-copy concat keyframe misalignment (rare)               | Switch render.py final concat to `-c:v libx264 -c:a aac`  |

@@ -15,6 +15,7 @@ import logging
 import re
 from urllib.parse import urlparse
 
+import anyio.to_thread
 from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 
 from app.core.config import settings
@@ -122,11 +123,14 @@ async def create_job(payload: JobCreateRequest) -> JobCreateResponse:
 
     job = await job_service.create_job(payload.youtube_url)
 
-    # Enqueue the worker task. If Redis is unreachable, surface a 502 so
-    # the client knows the job won't progress — but the doc has already
-    # been written so we keep it for visibility.
+    # Enqueue the worker task. If the dispatch backend (Modal or Redis) is
+    # unreachable, surface a 502 so the client knows the job won't progress
+    # — but the doc has already been written so we keep it for visibility.
+    # Dispatch does blocking network I/O, so run it off the event loop.
     try:
-        task_id = enqueue_process_video(job["job_id"])
+        task_id = await anyio.to_thread.run_sync(
+            enqueue_process_video, job["job_id"],
+        )
         await job_service.set_task_id(job["job_id"], task_id)
     except Exception as exc:
         logger.exception("Failed to enqueue process_video for %s", job["job_id"])
@@ -192,7 +196,7 @@ async def select_speaker(job_id: str, payload: SelectSpeakerRequest) -> SelectSp
     # State has already been moved to RENDERING by select_speaker(); now
     # enqueue the render task.
     try:
-        task_id = enqueue_render_video(job_id)
+        task_id = await anyio.to_thread.run_sync(enqueue_render_video, job_id)
         await job_service.set_task_id(job_id, task_id)
     except Exception as exc:
         logger.exception("Failed to enqueue render_video for %s", job_id)

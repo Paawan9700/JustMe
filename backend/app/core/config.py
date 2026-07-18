@@ -30,8 +30,18 @@ class Settings(BaseSettings):
     mongo_uri: str = Field(validation_alias="MONGO_URL")
     db_name: str = Field(validation_alias="DB_NAME")
 
-    # ---- Redis (used by Worker for Celery; deferred until M3+) -----------
+    # ---- Redis (Celery fallback dispatch only; see queue_backend) --------
     redis_url: Optional[str] = Field(default=None, validation_alias="REDIS_URL")
+
+    # ---- Job dispatch ------------------------------------------------------
+    # "modal" (default): spawn the deployed Modal functions on demand —
+    # containers start per job and scale to zero after, so idle cost is $0.
+    # "celery": legacy path — publish to Upstash Redis for a resident worker
+    # (requires REDIS_URL here and a running worker, e.g. modal_app.run_worker).
+    queue_backend: str = Field(default="modal", validation_alias="QUEUE_BACKEND")
+    modal_app_name: str = Field(default="justme-worker", validation_alias="MODAL_APP_NAME")
+    modal_token_id: Optional[str] = Field(default=None, validation_alias="MODAL_TOKEN_ID")
+    modal_token_secret: Optional[str] = Field(default=None, validation_alias="MODAL_TOKEN_SECRET")
 
     # ---- Cloudflare R2 ---------------------------------------------------
     r2_access_key_id: str = Field(validation_alias="R2_ACCESS_KEY_ID")

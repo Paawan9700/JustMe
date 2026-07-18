@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from pymongo import ReturnDocument
@@ -128,6 +128,59 @@ async def list_jobs(limit: int = 100) -> list[dict[str, Any]]:
     return docs
 
 
+# Statuses in which a worker is expected to be actively writing progress.
+_ACTIVE_STATUSES = {
+    JobStatus.QUEUED.value,
+    JobStatus.DOWNLOADING.value,
+    JobStatus.EXTRACTING_AUDIO.value,
+    JobStatus.DIARIZING.value,
+    JobStatus.GENERATING_SNIPPETS.value,
+    JobStatus.RENDERING.value,
+}
+
+# The longest legitimately silent stretch is WhisperX transcription mid-
+# DIARIZING (no progress writes for tens of minutes on long videos), and the
+# worker's soft time limit already fails any single attempt at 2h. Three
+# hours of silence therefore means the writer is dead — e.g. a Modal
+# container that crashed after its retries were exhausted — and nothing
+# will ever move this job again.
+_STALE_AFTER = timedelta(hours=3)
+
+
+async def _fail_if_stalled(doc: dict[str, Any]) -> dict[str, Any]:
+    """
+    Lazy read-side repair: flip a job to FAILED/STALLED when it sits in an
+    active status with no write for _STALE_AFTER. Goes through the
+    transition_status CAS (ANY -> FAILED is always legal), so a concurrent
+    worker write simply wins and the repair is skipped.
+    """
+    if doc.get("status") not in _ACTIVE_STATUSES:
+        return doc
+
+    updated_at = doc.get("updated_at")
+    if not isinstance(updated_at, datetime):
+        return doc
+    if updated_at.tzinfo is None:  # Mongo returns tz-naive UTC datetimes
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - updated_at <= _STALE_AFTER:
+        return doc
+
+    logger.warning(
+        "job %s stalled in %s since %s — marking FAILED/STALLED",
+        doc.get("job_id"), doc.get("status"), updated_at.isoformat(),
+    )
+    repaired = await transition_status(
+        doc["job_id"],
+        JobStatus.FAILED.value,
+        error={
+            "code": "STALLED",
+            "message": "Processing stalled and was marked failed. "
+                       "Please submit the job again.",
+        },
+    )
+    return repaired or doc
+
+
 async def get_job_hydrated(job_id: str) -> dict[str, Any] | None:
     """
     Same as get_job_raw, plus:
@@ -144,6 +197,8 @@ async def get_job_hydrated(job_id: str) -> dict[str, Any] | None:
     doc = await get_job_raw(job_id)
     if doc is None:
         return None
+
+    doc = await _fail_if_stalled(doc)
 
     storage = get_storage()
     status = doc.get("status")
