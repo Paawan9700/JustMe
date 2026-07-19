@@ -37,6 +37,7 @@ from app.services.recommendations import (  # noqa: E402
     build_recommendations_csv,
     merge_duplicate_stocks,
     partition_by_type,
+    require_trade_fields,
 )
 
 
@@ -285,6 +286,43 @@ def test_partition_preserves_order_and_all_fields():
     ]
     recs, _, _ = partition_by_type(items)
     assert recs == items  # same order, all fields (incl. evidence) intact
+
+
+# ---------------------------------------------------------------------------
+# require_trade_fields — completeness gate (Lenskart/Tech Mahindra rule)
+# ---------------------------------------------------------------------------
+
+def test_field_gate_buy_requires_full_setup():
+    full = {"stock_name": "LIC", "action": "BUY", "cmp": "438.5",
+            "stoploss": "425", "targets": "T1: 460; T2: 480"}
+    targets_only = {"stock_name": "Lenskart", "action": "BUY",
+                    "targets": "T1: 650; T2: 700"}  # no cmp, no SL -> view-ish
+    no_cmp = {"stock_name": "Tech Mahindra", "action": "BUY",
+              "stoploss": "1490", "targets": "T1: 1525"}
+    kept, demoted = require_trade_fields([full, targets_only, no_cmp])
+    assert [k["stock_name"] for k in kept] == ["LIC"]
+    assert [d["stock_name"] for d in demoted] == ["Lenskart", "Tech Mahindra"]
+
+
+def test_field_gate_sell_needs_only_one_level():
+    exit_call = {"stock_name": "Paytm", "action": "SELL", "stoploss": "850"}
+    short_call = {"stock_name": "Axis Bank June Futures", "action": "SELL",
+                  "targets": "T1: 1050"}
+    bare_sell = {"stock_name": "X", "action": "SELL"}  # no level at all
+    kept, demoted = require_trade_fields([exit_call, short_call, bare_sell])
+    assert [k["stock_name"] for k in kept] == ["Paytm", "Axis Bank June Futures"]
+    assert [d["stock_name"] for d in demoted] == ["X"]
+
+
+def test_field_gate_blank_or_missing_action_treated_as_buy():
+    kept, demoted = require_trade_fields([
+        {"stock_name": "A", "cmp": "100", "stoploss": "95", "targets": "110"},
+        {"stock_name": "B", "targets": "110"},   # incomplete, no action given
+        {"stock_name": "C", "action": "  ", "cmp": " ", "stoploss": "95",
+         "targets": "110"},                       # whitespace cmp = missing
+    ])
+    assert [k["stock_name"] for k in kept] == ["A"]
+    assert [d["stock_name"] for d in demoted] == ["B", "C"]
 
 
 # ---------------------------------------------------------------------------

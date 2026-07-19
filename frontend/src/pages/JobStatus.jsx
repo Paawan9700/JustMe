@@ -135,15 +135,18 @@ export default function JobStatus() {
 
   // ---- stock recommendations -------------------------------------------
   // The job stays DONE while recommendations generate, so the main poller
-  // (which stops at DONE) won't track this. We run a dedicated poll loop
-  // that ends as soon as recommendations_status leaves GENERATING.
-  useEffect(() => () => {
-    if (recsTimerRef.current) clearInterval(recsTimerRef.current);
-  }, []);
+  // (which stops at DONE) won't track this. A dedicated poll loop runs
+  // whenever the job reports GENERATING and ends when that status changes.
+  // Generation takes minutes (LLM over the full video), so the loop must
+  // survive transient fetch failures — it only gives up after several
+  // CONSECUTIVE errors, instead of dying on the first blip.
+  const recsFailsRef = useRef(0);
+  const RECS_MAX_CONSECUTIVE_FAILS = 10; // ~30s of continuous failure
 
   async function pollRecs() {
     try {
       const data = await getJob(jobId);
+      recsFailsRef.current = 0;
       setJob(data);
       if (data.recommendations_status !== "GENERATING") {
         clearInterval(recsTimerRef.current);
@@ -151,12 +154,31 @@ export default function JobStatus() {
         setGenerating(false);
       }
     } catch (err) {
-      clearInterval(recsTimerRef.current);
-      recsTimerRef.current = null;
-      setGenerating(false);
-      setGenError(err.message || "Failed to check recommendation status");
+      recsFailsRef.current += 1;
+      if (recsFailsRef.current >= RECS_MAX_CONSECUTIVE_FAILS) {
+        clearInterval(recsTimerRef.current);
+        recsTimerRef.current = null;
+        setGenerating(false);
+        setGenError(err.message || "Failed to check recommendation status");
+      }
+      // Otherwise: keep polling — generation is still running server-side.
     }
   }
+
+  // Start (or restart) the recs poller from the job state itself. This covers
+  // every path with one rule: the generate click, a page load/remount while a
+  // generation is already in flight, and recovery after an aborted loop.
+  useEffect(() => {
+    if (job?.recommendations_status === "GENERATING" && !recsTimerRef.current) {
+      recsFailsRef.current = 0;
+      recsTimerRef.current = setInterval(pollRecs, POLL_MS);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.recommendations_status]);
+
+  useEffect(() => () => {
+    if (recsTimerRef.current) clearInterval(recsTimerRef.current);
+  }, []);
 
   async function onGenerateRecommendations() {
     if (generating) return;
@@ -164,12 +186,11 @@ export default function JobStatus() {
     setGenerating(true);
     try {
       await generateRecommendations(jobId);
-      // Immediate poll so the UI reflects GENERATING without waiting POLL_MS.
+      // Immediate poll so the UI reflects GENERATING without waiting POLL_MS;
+      // the effect above starts the poll loop once the state lands.
       const data = await getJob(jobId);
       setJob(data);
-      if (data.recommendations_status === "GENERATING" && !recsTimerRef.current) {
-        recsTimerRef.current = setInterval(pollRecs, POLL_MS);
-      } else {
+      if (data.recommendations_status !== "GENERATING") {
         setGenerating(false);
       }
     } catch (err) {

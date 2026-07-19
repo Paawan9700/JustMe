@@ -14,8 +14,9 @@ Design:
     insights) later.
   * Pass 2 CLASSIFIES every named stock as "recommendation" or "view" (with a
     verbatim `evidence` quote); Python merges duplicate stocks and keeps only
-    the recommendations — views are logged and dropped, and `evidence` never
-    reaches the CSV.
+    the recommendations that carry a complete trade setup (see
+    `require_trade_fields`) — views/incomplete rows are logged and dropped,
+    and `evidence` never reaches the CSV.
   * `build_recommendations_csv`, `merge_duplicate_stocks` and `partition_by_type`
     are pure functions (unit-tested). `generate_for_job` is the async background
     task that does the I/O.
@@ -363,6 +364,32 @@ def merge_duplicate_stocks(items: list[dict]) -> list[dict]:
     return out
 
 
+def require_trade_fields(recs: list[dict]) -> tuple[list[dict], list[dict]]:
+    """
+    Deterministic completeness gate on recommendation-typed items (user rule,
+    2026-07-19: a genuine call carries the full trade setup; chart-talk with
+    only targets is a view). BUY rows must have cmp AND stoploss AND targets;
+    SELL rows only need one of stoploss/targets, because exit/book-profit
+    advice to holders ("850 ke SL ke saath exit") legitimately omits cmp and
+    targets yet is a locked-in recommendation. Returns (kept, demoted);
+    demoted items are dropped and logged like views.
+    """
+
+    def _has(item: dict, key: str) -> bool:
+        return bool(str(item.get(key) or "").strip())
+
+    kept: list[dict] = []
+    demoted: list[dict] = []
+    for item in recs:
+        action = str(item.get("action") or "").strip().upper()
+        if action == "SELL":
+            ok = _has(item, "stoploss") or _has(item, "targets")
+        else:  # BUY (or unspecified, treated as BUY): full setup required.
+            ok = _has(item, "cmp") and _has(item, "stoploss") and _has(item, "targets")
+        (kept if ok else demoted).append(item)
+    return kept, demoted
+
+
 def partition_by_type(items: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     """
     Split classified items into (recommendations, views, invalid). Only
@@ -543,13 +570,21 @@ async def generate_for_job(job_id: str) -> None:
                 job_id, len(raw_items) - len(merged),
             )
         items, views, invalid = partition_by_type(merged)
+        items, incomplete = require_trade_fields(items)
         for bad in invalid:
             logger.warning(
                 'recommendations[%s] item with missing/unknown "type"=%r '
                 "treated as view: %s",
                 job_id, bad.get("type"), bad.get("stock_name") or "<unnamed>",
             )
-        dropped = views + invalid
+        if incomplete:
+            logger.info(
+                "recommendations[%s] demoted %d incomplete recommendation(s) "
+                "(missing cmp/stoploss/targets): %s",
+                job_id, len(incomplete),
+                ", ".join(str(d.get("stock_name") or "<unnamed>") for d in incomplete),
+            )
+        dropped = views + invalid + incomplete
         if dropped:
             logger.info(
                 "recommendations[%s] dropped %d view item(s): %s",
