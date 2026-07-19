@@ -61,6 +61,19 @@ _FIELD_BY_COLUMN = {
 _GEMINI_FILE_ACTIVE_TIMEOUT_S = 300
 _GEMINI_FILE_POLL_INTERVAL_S = 2
 
+# Pass-2 retry budget. The typed response_schema makes malformed JSON
+# near-impossible by construction, but a response cut off mid-generation still
+# parses as broken JSON — retry just the cheap text call (the upload and the
+# transcript are reused), never the whole pipeline.
+_EXTRACT_JSON_ATTEMPTS = 3
+
+# Item key order doubles as the schema's property_ordering: evidence comes
+# BEFORE type so the model quotes the transcript before it classifies.
+_STOCK_ITEM_FIELDS = [
+    "stock_name", "evidence", "type", "action",
+    "cmp", "stoploss", "targets", "reasoning", "date",
+]
+
 TRANSCRIBE_SYSTEM_PROMPT = """\
 You transcribe a Hinglish (mixed Hindi and English) audio/video of stock-market \
 talk. Produce a faithful, VERBATIM transcript — do NOT summarise or translate.
@@ -239,6 +252,51 @@ def build_recommendations_csv(items: list[dict]) -> str:
     return buf.getvalue()
 
 
+def _parse_stocks_payload(content: str) -> list[dict]:
+    """
+    Parse pass 2's JSON text into the list of classified stock items.
+    Tolerates the pre-rename "recommendations" envelope key and filters
+    non-dicts. Raises json.JSONDecodeError on malformed JSON — the caller
+    retries the LLM call.
+    """
+    data = json.loads(content)
+    raw = []
+    if isinstance(data, dict):
+        raw = data.get("stocks") or data.get("recommendations") or []
+    if not isinstance(raw, list):
+        raw = []
+    return [i for i in raw if isinstance(i, dict)]
+
+
+def _build_extract_schema(types_mod):
+    """
+    Typed response schema for pass 2 (server-side constrained decoding):
+    the API can only emit JSON matching this shape, so unescaped quotes in
+    Hinglish `evidence` strings or a missing comma can no longer produce
+    unparseable output. "type" is a real enum, and stock_name/evidence/type
+    are required. Built lazily because google.genai is imported lazily.
+    """
+    string = types_mod.Schema(type=types_mod.Type.STRING)
+    item = types_mod.Schema(
+        type=types_mod.Type.OBJECT,
+        properties={
+            **{name: string for name in _STOCK_ITEM_FIELDS if name != "type"},
+            "type": types_mod.Schema(
+                type=types_mod.Type.STRING, enum=["recommendation", "view"]
+            ),
+        },
+        required=["stock_name", "evidence", "type"],
+        property_ordering=list(_STOCK_ITEM_FIELDS),
+    )
+    return types_mod.Schema(
+        type=types_mod.Type.OBJECT,
+        properties={
+            "stocks": types_mod.Schema(type=types_mod.Type.ARRAY, items=item)
+        },
+        required=["stocks"],
+    )
+
+
 def _normalized_type(value) -> str:
     """Normalise a "type" value for comparison; non-strings normalise to ""."""
     return value.strip().casefold() if isinstance(value, str) else ""
@@ -394,27 +452,45 @@ async def _extract_recommendations(video_path: str, video_title: str | None) -> 
         # ---- Pass 2: extract structured recs from the TRANSCRIPT TEXT only ----
         # No file/audio here — the model can only use the transcribed words, so it
         # cannot invent a name from price levels or complete a "[CUT OFF]" number.
-        ex_resp = await client.aio.models.generate_content(
-            model=settings.gemini_model,
-            contents=[
-                f"Video title: {video_title or ''}\n\n"
-                f"TRANSCRIPT:\n{transcript}\n\n{EXTRACT_USER_DIRECTIVE}"
-            ],
-            config=types.GenerateContentConfig(
-                system_instruction=EXTRACT_SYSTEM_PROMPT,
-                response_mime_type="application/json",
-                temperature=temperature,
-            ),
+        extract_config = types.GenerateContentConfig(
+            system_instruction=EXTRACT_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=_build_extract_schema(types),
+            temperature=temperature,
         )
-        content = ex_resp.text or "{}"
-        data = json.loads(content)
-        raw = []
-        if isinstance(data, dict):
-            # Tolerate the pre-rename envelope key from older prompt versions.
-            raw = data.get("stocks") or data.get("recommendations") or []
-        items = [i for i in raw if isinstance(i, dict)]
-        logger.debug("recommendations: pass 2 items: %s", items)
-        return items
+        extract_contents = [
+            f"Video title: {video_title or ''}\n\n"
+            f"TRANSCRIPT:\n{transcript}\n\n{EXTRACT_USER_DIRECTIVE}"
+        ]
+        last_exc: Exception | None = None
+        for attempt in range(1, _EXTRACT_JSON_ATTEMPTS + 1):
+            ex_resp = await client.aio.models.generate_content(
+                model=settings.gemini_model,
+                contents=extract_contents,
+                config=extract_config,
+            )
+            content = ex_resp.text or "{}"
+            try:
+                items = _parse_stocks_payload(content)
+            except json.JSONDecodeError as exc:
+                last_exc = exc
+                finish = None
+                try:
+                    finish = ex_resp.candidates[0].finish_reason
+                except Exception:  # noqa: BLE001 — diagnostics only.
+                    pass
+                logger.warning(
+                    "recommendations: pass 2 attempt %d/%d returned invalid "
+                    "JSON (finish_reason=%s): %s; tail=%r",
+                    attempt, _EXTRACT_JSON_ATTEMPTS, finish, exc, content[-200:],
+                )
+                continue
+            logger.debug("recommendations: pass 2 items: %s", items)
+            return items
+        raise RuntimeError(
+            "The AI returned malformed output for this video "
+            f"({_EXTRACT_JSON_ATTEMPTS} attempts). Please click Generate again."
+        ) from last_exc
     finally:
         if uploaded is not None:
             try:

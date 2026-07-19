@@ -13,6 +13,7 @@ generate_for_job, which we don't invoke here). Run with:
 
 import csv
 import io
+import json
 import os
 import pathlib
 import sys
@@ -32,6 +33,7 @@ for var in (
 
 from app.services.recommendations import (  # noqa: E402
     CSV_COLUMNS,
+    _parse_stocks_payload,
     build_recommendations_csv,
     merge_duplicate_stocks,
     partition_by_type,
@@ -283,6 +285,34 @@ def test_partition_preserves_order_and_all_fields():
     ]
     recs, _, _ = partition_by_type(items)
     assert recs == items  # same order, all fields (incl. evidence) intact
+
+
+# ---------------------------------------------------------------------------
+# _parse_stocks_payload
+# ---------------------------------------------------------------------------
+
+def test_parse_payload_stocks_and_legacy_envelope():
+    items = _parse_stocks_payload('{"stocks": [{"stock_name": "A"}, "junk"]}')
+    assert items == [{"stock_name": "A"}]  # non-dicts filtered
+    legacy = _parse_stocks_payload('{"recommendations": [{"stock_name": "B"}]}')
+    assert legacy == [{"stock_name": "B"}]
+
+
+def test_parse_payload_wrong_shapes_yield_empty():
+    assert _parse_stocks_payload("{}") == []
+    assert _parse_stocks_payload("[]") == []          # top level not a dict
+    assert _parse_stocks_payload('{"stocks": "x"}') == []  # envelope not a list
+
+
+def test_parse_payload_malformed_json_raises():
+    # A truncated/broken response must raise so the caller retries the call.
+    broken = '{"stocks": [{"stock_name": "A", "evidence": "le lo'
+    try:
+        _parse_stocks_payload(broken)
+    except json.JSONDecodeError:
+        pass
+    else:
+        raise AssertionError("malformed JSON did not raise JSONDecodeError")
 
 
 # ---------------------------------------------------------------------------
