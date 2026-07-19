@@ -60,8 +60,10 @@ class Settings(BaseSettings):
     # endpoint returns a clear 503 when the key is absent. Get a free key from
     # Google AI Studio: https://aistudio.google.com/apikey
     gemini_api_key: Optional[str] = Field(default=None, validation_alias="GEMINI_API_KEY")
-    # gemini-2.5-flash: strong extraction/reasoning and available on the free tier.
-    # (gemini-2.0-flash / -lite / 2.5-pro return free-tier quota 0 on personal keys.)
+    # Default stays gemini-2.5-flash (battle-tested, free tier) as the rollback
+    # baseline; production overrides via GEMINI_MODEL. Probed 2026-07-19 on our
+    # key: gemini-3.5-flash and gemini-3-flash-preview WORK on the free tier;
+    # 2.5-pro / 3-pro-preview / 3.1-pro-preview are quota-0 (paid-only).
     gemini_model: str = Field(default="gemini-2.5-flash", validation_alias="GEMINI_MODEL")
 
 

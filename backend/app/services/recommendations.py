@@ -12,8 +12,13 @@ Design:
     Python's `csv` module so escaping (commas/quotes/newlines in REASONING) is
     deterministic, and so the same JSON shape can fuel Phase-2 (prompt-driven
     insights) later.
-  * `build_recommendations_csv` is a pure function (unit-tested). `generate_for_job`
-    is the async background task that does the I/O.
+  * Pass 2 CLASSIFIES every named stock as "recommendation" or "view" (with a
+    verbatim `evidence` quote); Python merges duplicate stocks and keeps only
+    the recommendations — views are logged and dropped, and `evidence` never
+    reaches the CSV.
+  * `build_recommendations_csv`, `merge_duplicate_stocks` and `partition_by_type`
+    are pure functions (unit-tested). `generate_for_job` is the async background
+    task that does the I/O.
   * Best-effort: any failure records recommendations.status=FAILED with a message;
     it never raises into the caller or affects the video/transcript.
 """
@@ -81,50 +86,94 @@ is not actually spoken — even when the surrounding talk would let you guess it
 Output plain text only (no JSON, no commentary)."""
 
 EXTRACT_SYSTEM_PROMPT = """\
-You are given a TRANSCRIPT of a single stock analyst speaking (Hinglish). Extract \
-ONLY the stock recommendations explicitly present IN THE TRANSCRIPT TEXT. Work \
+You are given a TRANSCRIPT of a single stock analyst speaking (Hinglish). For \
+EVERY stock the analyst NAMES and discusses, decide whether he makes an actual \
+RECOMMENDATION or merely shares a VIEW, and extract the fields below. Work \
 solely from the transcript — do NOT use outside market knowledge, and rely on \
 nothing that is not written in it.
 
 Return ONLY a JSON object of this exact shape:
-{"recommendations": [
-  {"date": "", "stock_name": "", "action": "", "cmp": "", "stoploss": "", "targets": "", "reasoning": ""}
+{"stocks": [
+  {"stock_name": "", "evidence": "", "type": "", "action": "", "cmp": "", "stoploss": "", "targets": "", "reasoning": "", "date": ""}
 ]}
 
-Rules:
-- One object per stock that is BOTH recommended AND explicitly NAMED in the \
-transcript. The transcript often has price levels/targets/chart talk with NO stock \
-name attached (the analyst commenting on someone else's call) — DROP those entirely: \
-emit no row for a set of levels whose stock name does not appear in the transcript. \
-If there are no named recommendations, return {"recommendations": []}.
+TYPE — the most important field. Set "type" to exactly "recommendation" or "view".
+- "recommendation" ONLY if BOTH are true in the transcript:
+  (a) the analyst gives a clear instruction to act on THAT stock — buy / sell / \
+short / exit / book profit (e.g. "le lo", "kharid lo", "short karo", "exit kar \
+jao", "book kar lo", "SL ... kar do"), AND
+  (b) he states at least ONE concrete trade level for it: a stoploss OR a \
+target. The current market price (CMP) alone does NOT count as a trade level.
+- Everything else is a "view": an opinion, chart talk, "accha lag raha hai", \
+answering a viewer's question without giving levels, or an instruction with no \
+stoploss/target.
+- If you are unsure whether it is a recommendation, set "view". NEVER default \
+to "recommendation".
+- PAST calls: recapping an earlier call ("maine pichhle hafte Titan bola tha, \
+target hit ho gaya") is a "view" — UNLESS he gives fresh actionable guidance \
+NOW ("abhi bhi le sakte ho, SL 950 rakho" / "ab SL trail karke 980 kar do"): \
+then it is a "recommendation" using ONLY the levels he states now.
+- Telling existing holders of a stock to exit or book with a level ("jinke paas \
+Paytm hai, 850 ke stop loss ke saath exit kar jao") IS a "recommendation", \
+action "SELL".
+Examples:
+  "Titan 2020 pe le lo, stop loss 1990, target 2120" -> recommendation
+  "Titan bahut accha lag raha hai, results strong the" -> view (no instruction, no level)
+  "Titan abhi 2020 chal raha hai" -> view (CMP alone is not a trade level)
+  "Titan le sakte ho" with no stoploss/target given anywhere -> view (no level)
 
-- "action" must be exactly "BUY" or "SELL":
-    * Use "SELL" when the speaker recommends selling or shorting the stock. Signals \
-include: the speaker explicitly saying "sell", "short", "exit", or "book"; or \
-referring to the instrument as a futures/derivatives contract in a bearish context \
-(e.g. "Axis Bank June Futures"). Weigh the overall context, not just keywords.
-    * Otherwise use "BUY". This is the default — if it is genuinely unclear, choose \
-"BUY", because most recommendations are buys.
+- "evidence": the shortest verbatim transcript snippet(s) (max ~25 words, \
+Hinglish exactly as written) that prove the "type" — for a recommendation, the \
+words carrying the instruction and the level; for a view, the words showing he \
+only discussed it. Copy, never paraphrase.
 
-- "stock_name": copy the analyst's OWN name for the instrument from the transcript, \
-preserving any futures/month/derivative qualifier as written — e.g. keep "Axis Bank \
-June Futures", do NOT shorten it to "Axis Bank"; never ADD a qualifier the transcript \
-lacks. The name MUST be one that appears in the transcript, output in its standard \
-English spelling (e.g. "Bharat Forge"). NEVER infer, guess or supply a name from price \
-levels, chart levels, ticker prices, or your own market knowledge — if the transcript \
-has no name for a set of levels, DROP it (per the first rule).
+- One object per NAMED stock. The name MUST appear in the transcript. The \
+transcript often has price levels/targets/chart talk with NO stock name \
+attached (the analyst commenting on someone else's call) — emit NO object for \
+those, not even as a "view". If the analyst names no stocks at all, return \
+{"stocks": []}.
 
-- Put first and second targets together in the single "targets" field, e.g. \
+- If the SAME stock is discussed more than once, emit ONE object for it: for \
+each field use the LATEST value he states, and keep an earlier value where it \
+is not restated. Its "type" is "recommendation" if ANY of the mentions \
+qualifies as one.
+
+- "stock_name": copy the analyst's OWN name for the instrument from the \
+transcript, preserving any futures/month/derivative qualifier as written — \
+e.g. keep "Axis Bank June Futures", do NOT shorten it to "Axis Bank"; never \
+ADD a qualifier the transcript lacks. Output it in its standard English \
+spelling (e.g. "Bharat Forge"). NEVER infer, guess or supply a name from price \
+levels, chart levels, ticker prices, or your own market knowledge — if the \
+transcript has no name for a set of levels, DROP it (per the rule above).
+
+- "action" (recommendations only — leave "" for a view) must be exactly "BUY" \
+or "SELL":
+    * Use "SELL" when the recommendation is to sell, short, exit or book the \
+stock; or the instrument is a futures/derivatives contract in a bearish \
+context (e.g. "Axis Bank June Futures"). Weigh the overall context, not just \
+keywords.
+    * Otherwise use "BUY". If a confirmed recommendation is genuinely unclear \
+between buy and sell, choose "BUY".
+
+FIELD MEANINGS — the analyst states these in any order; match by meaning, not \
+position:
+- "cmp": the price the stock is trading at NOW, as he states it ("abhi 2020 \
+chal raha hai", "CMP is 2020").
+- "stoploss": the level at which he says to exit if the trade goes against you \
+("stop loss", "SL", "950 ka stoploss rakho").
+- "targets": the level(s) he expects the price to reach or says to book profit \
+at. Put first and second targets together in the single "targets" field, e.g. \
 "T1: 1500; T2: 1600". If only one target is given, just include that one.
 
-- Derive "date" from the video title ONLY if a date appears there; otherwise use "".
-
-- "reasoning": summarise the analyst's rationale for THAT call in clear, concise \
-ENGLISH (translate it from the Hinglish transcript — do NOT leave it in Hindi). \
-Cover the technical/fundamental points they actually make — chart levels, breakout/\
-breakdown, support/resistance, trend, volume, results/earnings, news or catalysts, \
-sector view, risk-reward — faithfully; do not pad and do NOT invent anything not in \
+- "reasoning" (recommendations only — leave "" for a view): summarise the \
+analyst's rationale for THAT call in clear, concise ENGLISH (translate it from \
+the Hinglish transcript — do NOT leave it in Hindi). Cover the technical/\
+fundamental points he actually makes — chart levels, breakout/breakdown, \
+support/resistance, trend, volume, results/earnings, news or catalysts, sector \
+view, risk-reward — faithfully; do not pad and do NOT invent anything not in \
 the transcript. If no reason is given, leave it "".
+
+- Derive "date" from the video title ONLY if a date appears there; otherwise use "".
 
 - NEVER fabricate or guess values. If the speaker did not state a field, leave it "".
 
@@ -153,18 +202,24 @@ TRANSCRIBE_USER_DIRECTIVE = (
 )
 
 EXTRACT_USER_DIRECTIVE = (
-    "Extract the recommendations from the transcript now. HARD RULES: (1) include a "
-    "stock ONLY if its name appears verbatim in the transcript — never infer a name "
-    "from price levels or from your own knowledge; (2) copy numbers exactly as "
-    "written, with no invented decimals; (3) never complete a number marked "
-    '"[CUT OFF]" — output the digits shown + "*" (e.g. "166*") or leave it blank.'
+    "Classify and extract every NAMED stock from the transcript now. HARD RULES: "
+    '(1) "type" is "recommendation" ONLY when the speaker gives a clear '
+    "buy/sell/short/exit instruction for that stock AND states a stoploss or "
+    "target for it — CMP alone is not enough; anything less, or any doubt, is "
+    '"view". (2) include a stock ONLY if its name appears verbatim in the '
+    "transcript — never infer a name from price levels or from your own "
+    "knowledge; (3) copy numbers exactly as written, with no invented decimals; "
+    '(4) never complete a number marked "[CUT OFF]" — output the digits shown + '
+    '"*" (e.g. "166*") or leave it blank; (5) same stock discussed more than '
+    "once -> ONE object with the latest stated values. Every object MUST have "
+    '"type" and a short verbatim "evidence" quote.'
 )
 
 
 def build_recommendations_csv(items: list[dict]) -> str:
     """
     Serialise a list of recommendation objects to a CSV string with the fixed
-    6-column header. Tolerant by design: any missing field becomes "" so we
+    7-column header. Tolerant by design: any missing field becomes "" so we
     never drop a row the LLM returned (recall over precision). Empty list ->
     a header-only CSV.
     """
@@ -184,16 +239,111 @@ def build_recommendations_csv(items: list[dict]) -> str:
     return buf.getvalue()
 
 
+def _normalized_type(value) -> str:
+    """Normalise a "type" value for comparison; non-strings normalise to ""."""
+    return value.strip().casefold() if isinstance(value, str) else ""
+
+
+def _merge_item_into(prev: dict, later: dict) -> None:
+    """
+    Fold a later mention of the same stock into `prev` (in place). Later
+    non-empty values win per field; an empty later value never erases an
+    earlier one ("latest stated value; unrestated fields keep the earlier
+    one"). Exceptions: `stock_name` keeps the first-mention spelling, and
+    `type` + `evidence` move as a PAIR — if exactly one mention is a
+    recommendation, its type AND evidence win regardless of order (a later
+    recap must not demote an earlier recommendation, and the surviving
+    evidence must justify the surviving type).
+    """
+    prev_is_rec = _normalized_type(prev.get("type")) == "recommendation"
+    later_is_rec = _normalized_type(later.get("type")) == "recommendation"
+    for key, val in later.items():
+        if key in ("stock_name", "type", "evidence"):
+            continue
+        if val is not None and str(val).strip():
+            prev[key] = val
+        else:
+            prev.setdefault(key, val)
+    if later_is_rec and not prev_is_rec:
+        prev["type"] = later.get("type")
+        prev["evidence"] = later.get("evidence")
+    elif prev_is_rec == later_is_rec:
+        # Same classification on both sides: last non-empty wins per field.
+        for key in ("type", "evidence"):
+            val = later.get(key)
+            if val is not None and str(val).strip():
+                prev[key] = val
+    # else: prev is the recommendation and later is not — keep prev's pair.
+
+
+def merge_duplicate_stocks(items: list[dict]) -> list[dict]:
+    """
+    Backstop for the prompt's one-object-per-stock rule: if pass 2 still emits
+    the same stock more than once, collapse the duplicates into one item.
+    Matching is exact stock_name only, case/whitespace-insensitive —
+    deliberately NO fuzzy matching, so "Axis Bank" never merges into
+    "Axis Bank June Futures" (the qualifier is load-bearing). Items without a
+    stock_name pass through unmerged; non-dicts are dropped. First-occurrence
+    order is preserved. Pure function; input items are not mutated.
+    """
+    out: list[dict] = []
+    by_key: dict[str, dict] = {}
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        copy = dict(item)
+        key = " ".join(str(item.get("stock_name") or "").split()).casefold()
+        if not key:
+            out.append(copy)
+            continue
+        prev = by_key.get(key)
+        if prev is None:
+            by_key[key] = copy
+            out.append(copy)
+        else:
+            _merge_item_into(prev, copy)
+    return out
+
+
+def partition_by_type(items: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    """
+    Split classified items into (recommendations, views, invalid). Only
+    "recommendation"-typed items reach the CSV; "view" is the explicit drop
+    bucket; anything else — missing/unknown/non-string type, non-dict item —
+    lands in invalid and is treated as a view downstream (safe-drop: the CSV
+    must contain only sure recommendations). Order and fields are preserved.
+    """
+    recs: list[dict] = []
+    views: list[dict] = []
+    invalid: list[dict] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            invalid.append(item)
+            continue
+        kind = _normalized_type(item.get("type"))
+        if kind == "recommendation":
+            recs.append(item)
+        elif kind == "view":
+            views.append(item)
+        else:
+            invalid.append(item)
+    return recs, views, invalid
+
+
 async def _extract_recommendations(video_path: str, video_title: str | None) -> list[dict]:
     """
     Two passes over Gemini, sharing one uploaded file:
       1. Transcribe the final video's (Hinglish) AUDIO to a faithful verbatim
          transcript, marking anything not fully audible as "[CUT OFF]".
-      2. Extract structured recommendations from that TRANSCRIPT TEXT only (no
-         audio), so the model can't fill acoustic gaps from its own market
+      2. Classify + extract EVERY named stock from that TRANSCRIPT TEXT only
+         (no audio), so the model can't fill acoustic gaps from its own market
          knowledge — i.e. invent stock names from price levels or complete
          cut-off numbers. Pass 2 is held to a checkable rule: the stock name
-         must appear verbatim in the transcript.
+         must appear verbatim in the transcript. Each item carries "type"
+         ("recommendation"/"view") plus a verbatim "evidence" quote; the
+         rec-vs-view filtering itself is done deterministically by the caller.
+
+    Returns ALL classified items (views included), dicts only.
 
     Owns the full Gemini file lifecycle (upload -> poll -> generate -> delete) so
     the uploaded file is always cleaned up, even on error.
@@ -220,13 +370,19 @@ async def _extract_recommendations(video_path: str, video_title: str | None) -> 
             await anyio.sleep(_GEMINI_FILE_POLL_INTERVAL_S)
             uploaded = await client.aio.files.get(name=uploaded.name)
 
+        # Gemini 2.x: pin temperature=0 (the battle-tested decode behavior).
+        # Gemini 3+ thinking models: leave temperature at its default — Google
+        # explicitly recommends against lowering it (it can degrade or loop
+        # the output). None means the field is simply not sent.
+        temperature = 0 if settings.gemini_model.startswith("gemini-2") else None
+
         # ---- Pass 1: faithful verbatim transcription from the AUDIO ----
         tx_resp = await client.aio.models.generate_content(
             model=settings.gemini_model,
             contents=[uploaded, TRANSCRIBE_USER_DIRECTIVE],
             config=types.GenerateContentConfig(
                 system_instruction=TRANSCRIBE_SYSTEM_PROMPT,
-                temperature=0,
+                temperature=temperature,
                 media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
             ),
         )
@@ -247,13 +403,18 @@ async def _extract_recommendations(video_path: str, video_title: str | None) -> 
             config=types.GenerateContentConfig(
                 system_instruction=EXTRACT_SYSTEM_PROMPT,
                 response_mime_type="application/json",
-                temperature=0,
+                temperature=temperature,
             ),
         )
         content = ex_resp.text or "{}"
         data = json.loads(content)
-        items = data.get("recommendations", []) if isinstance(data, dict) else []
-        return [i for i in items if isinstance(i, dict)]
+        raw = []
+        if isinstance(data, dict):
+            # Tolerate the pre-rename envelope key from older prompt versions.
+            raw = data.get("stocks") or data.get("recommendations") or []
+        items = [i for i in raw if isinstance(i, dict)]
+        logger.debug("recommendations: pass 2 items: %s", items)
+        return items
     finally:
         if uploaded is not None:
             try:
@@ -291,13 +452,34 @@ async def generate_for_job(job_id: str) -> None:
         video_title = job.get("video_title")
 
         # Download the final video, then let Gemini transcribe its audio and
-        # extract the recommendations in one call (off the event loop for the
-        # download). An empty result comes back as {"recommendations": []} ->
-        # a header-only CSV, so there's no empty-input special case here.
+        # classify/extract every named stock (off the event loop for the
+        # download). Duplicates are merged, then only "recommendation"-typed
+        # items reach the CSV — views are logged and dropped. An empty result
+        # still yields a header-only CSV.
         await anyio.to_thread.run_sync(
             storage.download_file, r2_key_final_video(job_id), video_path
         )
-        items = await _extract_recommendations(video_path, video_title)
+        raw_items = await _extract_recommendations(video_path, video_title)
+        merged = merge_duplicate_stocks(raw_items)
+        if len(merged) < len(raw_items):
+            logger.info(
+                "recommendations[%s] merged %d duplicate item(s) by stock name",
+                job_id, len(raw_items) - len(merged),
+            )
+        items, views, invalid = partition_by_type(merged)
+        for bad in invalid:
+            logger.warning(
+                'recommendations[%s] item with missing/unknown "type"=%r '
+                "treated as view: %s",
+                job_id, bad.get("type"), bad.get("stock_name") or "<unnamed>",
+            )
+        dropped = views + invalid
+        if dropped:
+            logger.info(
+                "recommendations[%s] dropped %d view item(s): %s",
+                job_id, len(dropped),
+                ", ".join(str(d.get("stock_name") or "<unnamed>") for d in dropped),
+            )
 
         csv_text = build_recommendations_csv(items)
         with open(csv_path, "w", encoding="utf-8") as fh:

@@ -1,6 +1,6 @@
 """
-Unit tests for the pure CSV serializer in
-`backend/app/services/recommendations.py::build_recommendations_csv`.
+Unit tests for the pure functions in `backend/app/services/recommendations.py`:
+`build_recommendations_csv`, `merge_duplicate_stocks`, `partition_by_type`.
 
 Mirrors the repo's existing self-running test style (see
 worker/tests/test_transcript.py) — no pytest harness is wired up. We set dummy
@@ -30,7 +30,12 @@ for var in (
 ):
     os.environ.setdefault(var, "test")
 
-from app.services.recommendations import build_recommendations_csv, CSV_COLUMNS  # noqa: E402
+from app.services.recommendations import (  # noqa: E402
+    CSV_COLUMNS,
+    build_recommendations_csv,
+    merge_duplicate_stocks,
+    partition_by_type,
+)
 
 
 def _parse(csv_text):
@@ -142,6 +147,182 @@ def test_values_are_trimmed():
     rows = _parse(build_recommendations_csv([{"stock_name": "  SBIN  ", "cmp": " 600 "}]))
     assert rows[1][CSV_COLUMNS.index("STOCKNAME")] == "SBIN"
     assert rows[1][CSV_COLUMNS.index("CMP")] == "600"
+
+
+# ---------------------------------------------------------------------------
+# merge_duplicate_stocks
+# ---------------------------------------------------------------------------
+
+def test_merge_same_stock_latest_value_wins():
+    merged = merge_duplicate_stocks([
+        {"stock_name": "Titan", "type": "recommendation", "cmp": "2020",
+         "targets": "T1: 2070"},
+        {"stock_name": "Titan", "type": "recommendation", "cmp": "2025",
+         "targets": "T1: 2080; T2: 2120"},
+    ])
+    assert len(merged) == 1
+    assert merged[0]["cmp"] == "2025"
+    assert merged[0]["targets"] == "T1: 2080; T2: 2120"
+
+
+def test_merge_keeps_earlier_value_when_not_restated():
+    merged = merge_duplicate_stocks([
+        {"stock_name": "Titan", "type": "recommendation", "stoploss": "1990",
+         "cmp": "2020"},
+        {"stock_name": "Titan", "type": "recommendation", "stoploss": "",
+         "targets": "T1: 2120"},
+    ])
+    assert len(merged) == 1
+    assert merged[0]["stoploss"] == "1990"  # empty later value must not erase
+    assert merged[0]["cmp"] == "2020"       # key absent later keeps earlier
+    assert merged[0]["targets"] == "T1: 2120"
+
+
+def test_merge_is_case_and_whitespace_insensitive():
+    merged = merge_duplicate_stocks([
+        {"stock_name": "Titan", "type": "view", "cmp": "2020"},
+        {"stock_name": "  TITAN ", "type": "view", "stoploss": "1990"},
+    ])
+    assert len(merged) == 1
+    assert merged[0]["stock_name"] == "Titan"  # first-mention spelling kept
+    assert merged[0]["stoploss"] == "1990"
+
+
+def test_merge_promotes_type_to_recommendation():
+    # View first, recommendation later: promote, evidence follows the rec.
+    a = merge_duplicate_stocks([
+        {"stock_name": "Titan", "type": "view",
+         "evidence": "accha lag raha hai", "cmp": "2020"},
+        {"stock_name": "Titan", "type": "recommendation",
+         "evidence": "le lo, SL 1990", "stoploss": "1990"},
+    ])
+    assert a[0]["type"] == "recommendation"
+    assert a[0]["evidence"] == "le lo, SL 1990"
+    assert a[0]["cmp"] == "2020"  # the view mention still fills the blank
+    # Recommendation first, view later: must NOT demote; evidence stays.
+    b = merge_duplicate_stocks([
+        {"stock_name": "Titan", "type": "recommendation",
+         "evidence": "le lo, SL 1990", "stoploss": "1990"},
+        {"stock_name": "Titan", "type": "view",
+         "evidence": "maine pehle bola tha", "cmp": "2030"},
+    ])
+    assert b[0]["type"] == "recommendation"
+    assert b[0]["evidence"] == "le lo, SL 1990"
+    assert b[0]["cmp"] == "2030"
+
+
+def test_merge_does_not_merge_futures_variant():
+    merged = merge_duplicate_stocks([
+        {"stock_name": "Axis Bank", "type": "view"},
+        {"stock_name": "Axis Bank June Futures", "type": "recommendation"},
+    ])
+    assert [m["stock_name"] for m in merged] == [
+        "Axis Bank", "Axis Bank June Futures",
+    ]
+
+
+def test_merge_preserves_first_mention_order():
+    merged = merge_duplicate_stocks([
+        {"stock_name": "A", "type": "view"},
+        {"stock_name": "B", "type": "view"},
+        {"stock_name": "A", "type": "recommendation", "stoploss": "10"},
+    ])
+    assert [m["stock_name"] for m in merged] == ["A", "B"]
+    assert merged[0]["type"] == "recommendation"
+
+
+def test_merge_passes_through_unnamed_and_non_dict_items():
+    merged = merge_duplicate_stocks([
+        {"type": "view"}, {"stock_name": "", "type": "view"}, "junk", None,
+    ])
+    # Two empty-name dicts must NOT merge with each other; non-dicts dropped.
+    assert len(merged) == 2
+    assert all(isinstance(m, dict) for m in merged)
+
+
+# ---------------------------------------------------------------------------
+# partition_by_type
+# ---------------------------------------------------------------------------
+
+def test_partition_keeps_only_recommendations():
+    recs, views, invalid = partition_by_type([
+        {"stock_name": "A", "type": "recommendation"},
+        {"stock_name": "B", "type": "view"},
+        {"stock_name": "C", "type": "recommendation"},
+    ])
+    assert [r["stock_name"] for r in recs] == ["A", "C"]
+    assert [v["stock_name"] for v in views] == ["B"]
+    assert invalid == []
+
+
+def test_partition_type_normalization():
+    recs, views, invalid = partition_by_type([
+        {"stock_name": "A", "type": "Recommendation"},
+        {"stock_name": "B", "type": " VIEW "},
+    ])
+    assert len(recs) == 1 and len(views) == 1 and not invalid
+
+
+def test_partition_missing_or_unknown_type_is_invalid():
+    recs, views, invalid = partition_by_type([
+        {"stock_name": "X"},                   # missing type
+        {"stock_name": "Y", "type": "maybe"},  # unknown type
+        {"stock_name": "Z", "type": None},     # non-string type
+        "junk",                                # non-dict
+    ])
+    assert recs == [] and views == []
+    assert len(invalid) == 4
+
+
+def test_partition_preserves_order_and_all_fields():
+    items = [
+        {"stock_name": "A", "type": "recommendation",
+         "evidence": "le lo, SL 90", "cmp": "100"},
+        {"stock_name": "B", "type": "recommendation",
+         "evidence": "short karo, target 50", "cmp": "60"},
+    ]
+    recs, _, _ = partition_by_type(items)
+    assert recs == items  # same order, all fields (incl. evidence) intact
+
+
+# ---------------------------------------------------------------------------
+# CSV interplay — classification fields must never leak into the CSV
+# ---------------------------------------------------------------------------
+
+def test_csv_ignores_type_and_evidence_fields():
+    text = build_recommendations_csv([{
+        "stock_name": "Titan", "type": "recommendation",
+        "evidence": "Titan 2020 pe le lo, SL 1990", "stoploss": "1990",
+    }])
+    rows = _parse(text)
+    assert rows[0] == CSV_COLUMNS  # header still the frozen 7 columns
+    assert "recommendation" not in text.splitlines()[1]
+    assert "le lo" not in text
+    assert rows[1][CSV_COLUMNS.index("STOCKNAME")] == "Titan"
+    assert rows[1][CSV_COLUMNS.index("STOPLOSS")] == "1990"
+
+
+def test_pipeline_view_then_rec_yields_one_row():
+    # Compose the real pipeline order: merge -> partition -> CSV.
+    raw = [
+        {"stock_name": "Titan", "type": "view",
+         "evidence": "abhi 2020 chal raha hai", "cmp": "2020"},
+        {"stock_name": "Titan", "type": "recommendation",
+         "evidence": "le lo, SL 1990 target 2120",
+         "action": "BUY", "stoploss": "1990", "targets": "T1: 2120"},
+        {"stock_name": "Paytm", "type": "view",
+         "evidence": "results ke baad dekhenge"},
+    ]
+    recs, views, invalid = partition_by_type(merge_duplicate_stocks(raw))
+    rows = _parse(build_recommendations_csv(recs))
+    assert len(rows) == 2  # header + exactly one row
+    row = rows[1]
+    assert row[CSV_COLUMNS.index("STOCKNAME")] == "Titan"
+    assert row[CSV_COLUMNS.index("CMP")] == "2020"       # from the view mention
+    assert row[CSV_COLUMNS.index("STOPLOSS")] == "1990"  # from the rec mention
+    assert row[CSV_COLUMNS.index("TARGETS")] == "T1: 2120"
+    assert [v["stock_name"] for v in views] == ["Paytm"]
+    assert invalid == []
 
 
 if __name__ == "__main__":
