@@ -89,10 +89,24 @@ image = (
     )
     .pip_install_from_requirements(str(_REQUIREMENTS))
     .pip_install("git+https://github.com/m-bain/whisperX.git")
+    # NLTK 'punkt_tab': whisperx.align() uses NLTK for sentence splitting and
+    # will try to DOWNLOAD this corpus at job time, which fails in the container
+    # and surfaces as a fatal ALIGN_FAILED (diarize.py:186). Bake it in at build
+    # time instead so no job ever depends on a runtime fetch. Must run after the
+    # whisperX layer — that's what installs nltk.
+    .run_commands(
+        "python -m nltk.downloader -d /usr/local/share/nltk_data punkt punkt_tab "
+        "|| /opt/conda/bin/python -m nltk.downloader -d /usr/local/share/nltk_data punkt punkt_tab"
+    )
     # Route every model cache to the shared Volume mounted at /cache:
     # HF_HOME covers faster-whisper + pyannote (diarization, VAD, reclaim's
     # embedder); TORCH_HOME covers the wav2vec2 align model (torch.hub).
-    .env({"HF_HOME": "/cache/huggingface", "TORCH_HOME": "/cache/torch"})
+    # NLTK_DATA points at the baked-in corpora above (independent of $HOME).
+    .env({
+        "HF_HOME": "/cache/huggingface",
+        "TORCH_HOME": "/cache/torch",
+        "NLTK_DATA": "/usr/local/share/nltk_data",
+    })
     # Bake the worker + shared packages into the image. Modal needs the
     # absolute repo paths so the image gets fresh copies on every deploy.
     # (Local-dir layers must stay last in the chain.)

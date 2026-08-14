@@ -12,7 +12,19 @@
 # - `whisperx` is installed in the Dockerfile from its git head because
 #   PyPI lags upstream. Don't add it here either.
 
-yt-dlp>=2026.3.17
+# NOTE: bump this floor to force Modal to rebuild the cached pip layer.
+# Modal keys that layer on this file's contents, so a stale floor freezes
+# yt-dlp at whatever version resolved on the first build — which is how the
+# 2026-08-14 "HTTP 403 Forbidden" outage happened (YouTube applied DRM to
+# tv-client formats; the frozen yt-dlp didn't know to skip them).
+yt-dlp>=2026.7.4
+# REQUIRED for downloads to work at all. yt-dlp must run YouTube's player JS to
+# decipher the "n" URL parameter; without it googlevideo returns 403 on the media
+# fetch. Deno (installed in modal_app.py) is only the JS *runtime* — this package
+# is the solver *script* it executes. Missing it caused the 2026-08-14 403 outage.
+# Installing it here keeps the solver baked into the image (no runtime fetch from
+# GitHub/npm, which `--remote-components` would otherwise need).
+yt-dlp-ejs>=0.8.0
 boto3>=1.43.0
 celery[redis]>=5.4.0
 pymongo>=4.5.0
