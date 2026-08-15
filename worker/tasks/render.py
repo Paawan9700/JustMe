@@ -49,6 +49,7 @@ from worker.utils.ffmpeg import FFmpegError, detect_silence, run_ffmpeg
 from worker.utils.storage import download_file, upload_file
 from shared.constants import (
     JobStatus,
+    r2_key_final_audio,
     r2_key_final_video,
     r2_key_transcript,
     r2_key_transcription,
@@ -359,6 +360,50 @@ def run_render(job_id: str, job_dir: Path) -> None:
         {"job_id": job_id},
         {"$set": {"artifacts.final_video_key": final_key}},
     )
+
+    # 9. Audio-only sidecar for the recommendations LLM (best-effort).
+    #
+    # Stream copy, so no re-encode and no quality loss. This exists because the
+    # API service sends this file to Gemini instead of final.mp4: pass 1 only
+    # transcribes speech, so shipping video frames costs ~3.6x the input tokens
+    # for an identical transcript and makes the request much likelier to be
+    # rejected with 503 when Gemini is busy. The API has no ffmpeg, so it has to
+    # happen here.
+    #
+    # Deliberately non-fatal: the render itself has already succeeded and been
+    # uploaded, so a failure here must not fail the job. The API falls back to
+    # final.mp4 when artifacts.final_audio_key is absent (which is also the case
+    # for every job rendered before this change).
+    final_audio_path = job_dir / "final_audio.m4a"
+    try:
+        run_ffmpeg([
+            "-i", str(final_path),
+            "-vn",
+            "-c:a", "copy",
+            str(final_audio_path),
+            "-y",
+        ])
+        if not final_audio_path.exists() or final_audio_path.stat().st_size == 0:
+            raise FFmpegError("audio extraction produced an empty file")
+        final_audio_key = r2_key_final_audio(job_id)
+        upload_file(str(final_audio_path), final_audio_key)
+        db.jobs.update_one(
+            {"job_id": job_id},
+            {"$set": {"artifacts.final_audio_key": final_audio_key}},
+        )
+        logger.info(
+            "render[%s] final audio uploaded (%.1f MB) -> %s",
+            job_id,
+            final_audio_path.stat().st_size / 1_000_000.0,
+            final_audio_key,
+        )
+    except Exception:  # noqa: BLE001 — best-effort sidecar; never fail the job.
+        logger.warning(
+            "render[%s] final audio extraction/upload failed; recommendations "
+            "will fall back to final.mp4",
+            job_id,
+            exc_info=True,
+        )
 
     total_dur = sum(s["end"] - s["start"] for s in cut_list)
     video_duration = duration_sec

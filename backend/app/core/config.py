@@ -61,9 +61,24 @@ class Settings(BaseSettings):
     # Google AI Studio: https://aistudio.google.com/apikey
     gemini_api_key: Optional[str] = Field(default=None, validation_alias="GEMINI_API_KEY")
     # Default stays gemini-2.5-flash (battle-tested, free tier) as the rollback
-    # baseline; production overrides via GEMINI_MODEL. Probed 2026-07-19 on our
-    # key: gemini-3.5-flash and gemini-3-flash-preview WORK on the free tier;
-    # 2.5-pro / 3-pro-preview / 3.1-pro-preview are quota-0 (paid-only).
+    # baseline; production overrides via GEMINI_MODEL (currently
+    # gemini-3-flash-preview).
+    #
+    # DO NOT "upgrade" this without re-running the real pass-1 request against
+    # the candidate — cheap text probes prove nothing. Re-probed 2026-08-14 with
+    # the actual transcription prompt on an 8:53 clip:
+    #   gemini-3-flash-preview  audio 13,730 tok / 63.9s / full transcript  OK
+    #   gemini-3.5-flash        403 PERMISSION_DENIED on video, and on audio
+    #                           returns a ONE-CHARACTER transcript after 299s —
+    #                           which trips the empty-transcript branch below and
+    #                           silently yields zero recommendations. Worse than
+    #                           an error. (The 2026-07-19 note that it "works" is
+    #                           superseded.)
+    #   gemini-3.6 / 3.7-flash  503 UNAVAILABLE on the real request
+    #   2.5-pro                 404 on our key
+    # So gemini-3-flash-preview is the only model that actually does this job.
+    # There is no viable model fallback; transient failures are handled by the
+    # backoff retry in services/recommendations.py instead.
     gemini_model: str = Field(default="gemini-2.5-flash", validation_alias="GEMINI_MODEL")
 
 

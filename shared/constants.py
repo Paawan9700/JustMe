@@ -81,6 +81,7 @@ def is_legal_transition(current: str, new: str) -> bool:
 #   jobs/{job_id}/audio.wav
 #   jobs/{job_id}/snippets/{speaker_label}.mp3
 #   jobs/{job_id}/final.mp4
+#   jobs/{job_id}/final_audio.m4a    (audio-only copy of final.mp4, for the LLM)
 #   jobs/{job_id}/transcript.json     (structured, all segments — Phase-2 source)
 #   jobs/{job_id}/diarization.json    (raw pyannote turns — debug/attribution)
 #   jobs/{job_id}/transcription.txt   (plain-text transcript of the final video)
@@ -109,6 +110,24 @@ def r2_key_snippet(job_id: str, speaker_label: str) -> str:
 def r2_key_final_video(job_id: str) -> str:
     """Final stitched video of only the selected speaker."""
     return f"jobs/{job_id}/final.mp4"
+
+
+def r2_key_final_audio(job_id: str) -> str:
+    """
+    Audio-only track of the final video, stream-copied out of final.mp4 at
+    render time (no re-encode, so it is lossless and near-instant).
+
+    Exists purely so the recommendations service can send Gemini AUDIO instead
+    of VIDEO. Pass 1 only ever transcribes speech, so the video frames are dead
+    weight: measured on an 8:53 clip, video = 48,907 input tokens / 170.7s vs
+    audio = 13,730 tokens / 63.9s for an identical transcript. The smaller
+    request is also far less likely to be shed with 503 UNAVAILABLE when
+    Gemini capacity is tight.
+
+    Written by the worker (which has ffmpeg) rather than the API service, which
+    has none. Best-effort: if it is missing, the API falls back to final.mp4.
+    """
+    return f"jobs/{job_id}/final_audio.m4a"
 
 
 def r2_key_transcript(job_id: str) -> str:

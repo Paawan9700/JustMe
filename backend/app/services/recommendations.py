@@ -31,15 +31,21 @@ import io
 import json
 import logging
 import os
+import random
 import tempfile
 import time
+from typing import Any
 
 import anyio
 
 from app.core.config import settings
 from app.services import job_service
 from app.services.storage import get_storage
-from shared.constants import r2_key_final_video, r2_key_recommendations
+from shared.constants import (
+    r2_key_final_audio,
+    r2_key_final_video,
+    r2_key_recommendations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +73,26 @@ _GEMINI_FILE_POLL_INTERVAL_S = 2
 # parses as broken JSON — retry just the cheap text call (the upload and the
 # transcript are reused), never the whole pipeline.
 _EXTRACT_JSON_ATTEMPTS = 3
+
+# Transient-failure retry budget for the generate_content calls themselves.
+#
+# Gemini returns 503 UNAVAILABLE ("high demand") when its serving capacity can't
+# accept a request right now. This is NOT a model outage and NOT a bug here: a
+# trivial prompt succeeds against the same model in the same second while a
+# heavy transcription request is shed. Measured 2026-08-14: gemini-3.6-flash
+# answered a "Say OK" probe 3/3 in ~2s, then 503'd 12s into the real request.
+#
+# These spikes clear in seconds, so waiting and re-asking is the whole cure.
+# Delays are 2s, 4s, 8s, 16s plus up to 50% jitter (~30-45s of patience total).
+# Jitter matters because several jobs shed at the same instant would otherwise
+# all retry on the same tick and collide again.
+_LLM_RETRY_ATTEMPTS = 5
+_LLM_RETRY_BASE_S = 2.0
+
+# HTTP codes worth retrying: 429 = rate limited, 500 = transient server error,
+# 503 = capacity. Anything else (400 bad request, 403 permission, 404 unknown
+# model) is a real fault that retrying would only delay.
+_RETRYABLE_STATUS = (429, 500, 503)
 
 # Item key order doubles as the schema's property_ordering: evidence comes
 # BEFORE type so the model quotes the transcript before it classifies.
@@ -415,7 +441,55 @@ def partition_by_type(items: list[dict]) -> tuple[list[dict], list[dict], list[d
     return recs, views, invalid
 
 
-async def _extract_recommendations(video_path: str, video_title: str | None) -> list[dict]:
+def _is_transient(exc: Exception) -> bool:
+    """
+    True when `exc` is a capacity/rate blip worth re-asking about.
+
+    google-genai surfaces the HTTP status on `.code`, but that isn't guaranteed
+    across SDK versions, so fall back to matching the status text that always
+    appears in the message (e.g. "503 UNAVAILABLE. {...}").
+    """
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code in _RETRYABLE_STATUS
+    text = str(exc)
+    return any(str(s) in text for s in _RETRYABLE_STATUS) or "UNAVAILABLE" in text
+
+
+async def _generate_with_retry(client, *, model, contents, config, what: str):
+    """
+    Call generate_content, retrying transient failures with exponential backoff
+    and jitter.
+
+    MUST be called while the uploaded Gemini file is still alive, so a retry
+    re-sends only the (cheap) inference request. Retrying any further out would
+    repeat the R2 download and the file upload — minutes of work — for a hiccup
+    that clears in seconds.
+    """
+    for attempt in range(1, _LLM_RETRY_ATTEMPTS + 1):
+        try:
+            return await client.aio.models.generate_content(
+                model=model, contents=contents, config=config,
+            )
+        except Exception as exc:  # noqa: BLE001 — re-raised unless transient.
+            if attempt == _LLM_RETRY_ATTEMPTS or not _is_transient(exc):
+                raise
+            base = _LLM_RETRY_BASE_S * (2 ** (attempt - 1))
+            delay = base + random.uniform(0, base * 0.5)
+            logger.warning(
+                "recommendations: %s attempt %d/%d failed transiently (%s); "
+                "retrying in %.1fs",
+                what, attempt, _LLM_RETRY_ATTEMPTS, exc, delay,
+            )
+            await anyio.sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+async def _extract_recommendations(
+    media_path: str,
+    video_title: str | None,
+    mime_type: str = "video/mp4",
+) -> list[dict]:
     """
     Two passes over Gemini, sharing one uploaded file:
       1. Transcribe the final video's (Hinglish) AUDIO to a faithful verbatim
@@ -442,8 +516,8 @@ async def _extract_recommendations(video_path: str, video_title: str | None) -> 
     uploaded = None
     try:
         uploaded = await client.aio.files.upload(
-            file=video_path,
-            config=types.UploadFileConfig(mime_type="video/mp4"),
+            file=media_path,
+            config=types.UploadFileConfig(mime_type=mime_type),
         )
         # Video uploads go PROCESSING -> ACTIVE; poll until usable (or give up).
         deadline = time.monotonic() + _GEMINI_FILE_ACTIVE_TIMEOUT_S
@@ -462,14 +536,20 @@ async def _extract_recommendations(video_path: str, video_title: str | None) -> 
         temperature = 0 if settings.gemini_model.startswith("gemini-2") else None
 
         # ---- Pass 1: faithful verbatim transcription from the AUDIO ----
-        tx_resp = await client.aio.models.generate_content(
+        # media_resolution only means anything for video input; when we send the
+        # audio-only sidecar there are no frames to down-sample.
+        tx_config: dict[str, Any] = {
+            "system_instruction": TRANSCRIBE_SYSTEM_PROMPT,
+            "temperature": temperature,
+        }
+        if mime_type.startswith("video/"):
+            tx_config["media_resolution"] = types.MediaResolution.MEDIA_RESOLUTION_LOW
+        tx_resp = await _generate_with_retry(
+            client,
             model=settings.gemini_model,
             contents=[uploaded, TRANSCRIBE_USER_DIRECTIVE],
-            config=types.GenerateContentConfig(
-                system_instruction=TRANSCRIBE_SYSTEM_PROMPT,
-                temperature=temperature,
-                media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
-            ),
+            config=types.GenerateContentConfig(**tx_config),
+            what="pass 1 (transcribe)",
         )
         transcript = (tx_resp.text or "").strip()
         if not transcript:
@@ -491,10 +571,12 @@ async def _extract_recommendations(video_path: str, video_title: str | None) -> 
         ]
         last_exc: Exception | None = None
         for attempt in range(1, _EXTRACT_JSON_ATTEMPTS + 1):
-            ex_resp = await client.aio.models.generate_content(
+            ex_resp = await _generate_with_retry(
+                client,
                 model=settings.gemini_model,
                 contents=extract_contents,
                 config=extract_config,
+                what=f"pass 2 (extract, try {attempt})",
             )
             content = ex_resp.text or "{}"
             try:
@@ -541,7 +623,7 @@ async def generate_for_job(job_id: str) -> None:
     """
     storage = get_storage()
     tmp_dir = tempfile.mkdtemp(prefix=f"recs_{job_id}_")
-    video_path = os.path.join(tmp_dir, "final.mp4")
+    media_path = os.path.join(tmp_dir, "final.mp4")  # reassigned below if audio
     csv_path = os.path.join(tmp_dir, "recommendations.csv")
 
     try:
@@ -554,15 +636,31 @@ async def generate_for_job(job_id: str) -> None:
             return
         video_title = job.get("video_title")
 
-        # Download the final video, then let Gemini transcribe its audio and
+        # Prefer the audio-only sidecar the worker writes at render time: pass 1
+        # just transcribes speech, so the video frames are dead weight — ~3.6x
+        # the input tokens and ~2.7x the latency for an identical transcript,
+        # and a much bigger request for Gemini to shed with a 503 under load.
+        # Jobs rendered before that sidecar existed (and any render where the
+        # best-effort extraction failed) fall back to final.mp4 unchanged.
+        if (job.get("artifacts") or {}).get("final_audio_key"):
+            media_key = r2_key_final_audio(job_id)
+            media_path = os.path.join(tmp_dir, "final_audio.m4a")
+            mime_type = "audio/mp4"
+        else:
+            media_key = r2_key_final_video(job_id)
+            mime_type = "video/mp4"
+            logger.info(
+                "recommendations[%s] no final_audio_key; falling back to "
+                "final.mp4 (older job or failed sidecar)", job_id,
+            )
+
+        # Download the chosen media, then let Gemini transcribe its audio and
         # classify/extract every named stock (off the event loop for the
         # download). Duplicates are merged, then only "recommendation"-typed
         # items reach the CSV — views are logged and dropped. An empty result
         # still yields a header-only CSV.
-        await anyio.to_thread.run_sync(
-            storage.download_file, r2_key_final_video(job_id), video_path
-        )
-        raw_items = await _extract_recommendations(video_path, video_title)
+        await anyio.to_thread.run_sync(storage.download_file, media_key, media_path)
+        raw_items = await _extract_recommendations(media_path, video_title, mime_type)
         merged = merge_duplicate_stocks(raw_items)
         if len(merged) < len(raw_items):
             logger.info(
@@ -612,7 +710,7 @@ async def generate_for_job(job_id: str) -> None:
             error={"code": "GENERATION_FAILED", "message": str(exc)},
         )
     finally:
-        for path in (video_path, csv_path):
+        for path in (media_path, csv_path):
             try:
                 os.remove(path)
             except OSError:
