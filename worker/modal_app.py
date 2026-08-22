@@ -42,9 +42,34 @@ Legacy fallback (resident Celery worker):
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import modal
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+# Nothing else in the worker configures logging, and every module logs through
+# `logging.getLogger(__name__)`. Left unconfigured, Python's last-resort handler
+# emits WARNING and above only — so every logger.info() was silently discarded
+# in the Modal path: the per-stage timings in pipeline.py, the ephemeral-cleanup
+# confirmations in pipeline.py / render.py, the resume-skip notices. The only
+# worker output that ever reached Modal's log view was yt-dlp / WhisperX writing
+# straight to stdout, plus warnings and tracebacks.
+#
+# Celery does configure logging, but only when a worker process boots, and the
+# on-demand functions never boot one (they call run_process_video directly), so
+# nothing was picking up the slack.
+#
+# Configured at import: Modal imports this module inside the container before
+# calling any function body, so this covers every function in the file, and
+# Modal captures stderr per function call.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    force=True,  # win even if an imported dependency already claimed the root
+)
 
 # ---------------------------------------------------------------------------
 # Image: matches worker/Dockerfile as closely as possible.
