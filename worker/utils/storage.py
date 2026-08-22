@@ -104,3 +104,43 @@ def file_exists(r2_key: str) -> bool:
         if code in ("404", "NoSuchKey", "NotFound"):
             return False
         raise
+
+
+def delete_file(r2_key: str) -> None:
+    """
+    Delete one object. Idempotent: an already-absent key is not an error.
+
+    Used to reclaim the `ephemeral/` intermediates (source.mp4, audio.wav) the
+    moment the stage that needed them is finished — see the layout notes in
+    shared/constants.py for why code deletion is required rather than a
+    lifecycle rule alone.
+    """
+    _client().delete_object(Bucket=_bucket(), Key=r2_key)
+
+
+def delete_prefix(prefix: str) -> int:
+    """
+    Delete every object under `prefix`; returns how many were removed.
+
+    Needed for the per-speaker snippet fan-out, where the key count isn't known
+    up front. Pages the listing and deletes in batches of 1000 (the S3 API cap).
+
+    Refuses a prefix that doesn't start with "ephemeral/" — this only ever exists
+    to reclaim intermediates, and a bad caller must not be able to wipe the
+    durable `jobs/` deliverables.
+    """
+    if not prefix.startswith("ephemeral/"):
+        raise ValueError(
+            f"delete_prefix refuses non-ephemeral prefix {prefix!r} — "
+            "durable artifacts under jobs/ must never be bulk-deleted"
+        )
+    client, bucket, removed = _client(), _bucket(), 0
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+        if not keys:
+            continue
+        for i in range(0, len(keys), 1000):
+            client.delete_objects(Bucket=bucket, Delete={"Objects": keys[i:i + 1000]})
+        removed += len(keys)
+    return removed

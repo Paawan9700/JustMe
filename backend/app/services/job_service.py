@@ -391,6 +391,28 @@ async def select_speaker(job_id: str, speaker_label: str) -> dict[str, Any]:
             "message": f"Speaker {speaker_label} not found in this job",
         }
 
+    # source.mp4 lives under the ephemeral/ prefix, which carries a short R2
+    # lifecycle rule. A job left sitting in AWAITING_SELECTION for longer than
+    # that window has lost its source, so rendering would download-fail deep
+    # inside the worker and land the job in FAILED with an opaque storage error.
+    # Check up front and say what actually happened instead.
+    source_key = (job.get("artifacts") or {}).get("source_video_key")
+    if source_key:
+        import anyio  # local import: keeps this module free of I/O deps at import
+        from app.services.storage import get_storage
+
+        exists = await anyio.to_thread.run_sync(get_storage().file_exists, source_key)
+        if not exists:
+            return {
+                "ok": False,
+                "error_code": "WRONG_STATE",
+                "current_status": job["status"],
+                "message": (
+                    "This job's source video has expired, so it can no longer be "
+                    "rendered. Please submit the video again."
+                ),
+            }
+
     # Atomically: set selected_speaker AND move to RENDERING. We do these
     # as one update so polling clients see a consistent state.
     updated = await db.jobs.find_one_and_update(
@@ -455,11 +477,35 @@ async def claim_recommendations_generating(job_id: str) -> dict[str, Any]:
             "message": "Recommendations can only be generated once the job is DONE",
         }
 
-    if not (job.get("artifacts") or {}).get("final_video_key"):
+    artifacts = job.get("artifacts") or {}
+    if not artifacts.get("final_video_key"):
         return {
             "ok": False,
             "error_code": "NO_VIDEO",
             "message": "This job has no final video to generate recommendations from",
+        }
+
+    # The key on the job doc only records that we uploaded the media ONCE. R2
+    # has a 7-day lifecycle rule on the jobs/ prefix, so for any older job the
+    # object is long gone while the key happily remains — which used to let the
+    # request sail through, flip to GENERATING, and then die inside the
+    # background task with a raw boto3 "404 HeadObject Not Found". Check the
+    # bucket, not just the database. Prefer the audio sidecar since that is what
+    # generate_for_job will actually download.
+    import anyio  # local import: keeps this module free of I/O deps at import time
+    from app.services.storage import get_storage
+
+    media_key = artifacts.get("final_audio_key") or artifacts["final_video_key"]
+    media_exists = await anyio.to_thread.run_sync(get_storage().file_exists, media_key)
+    if not media_exists:
+        return {
+            "ok": False,
+            "error_code": "NO_VIDEO",
+            "message": (
+                "This video's files have expired (artifacts are kept for 7 days), "
+                "so recommendations can no longer be generated for it. Process the "
+                "video again to get them."
+            ),
         }
 
     if (job.get("recommendations") or {}).get("status") == "GENERATING":

@@ -441,6 +441,21 @@ def partition_by_type(items: list[dict]) -> tuple[list[dict], list[dict], list[d
     return recs, views, invalid
 
 
+def _is_daily_quota(exc: Exception) -> bool:
+    """
+    True for a 429 that means "you have spent today's free-tier allowance",
+    as opposed to a short per-minute rate limit.
+
+    These are NOT worth retrying: the free tier allows only 20 generate_content
+    calls per day per model (quotaId GenerateRequestsPerDayPerProjectPerModel-
+    FreeTier), and that window resets in hours, not seconds. Backing off against
+    it just delays an inevitable failure — and Google still advertises a short
+    `retryDelay` on these, so trusting that field alone would be misleading.
+    """
+    text = str(exc)
+    return "PerDay" in text or "free_tier_requests" in text
+
+
 def _is_transient(exc: Exception) -> bool:
     """
     True when `exc` is a capacity/rate blip worth re-asking about.
@@ -448,7 +463,11 @@ def _is_transient(exc: Exception) -> bool:
     google-genai surfaces the HTTP status on `.code`, but that isn't guaranteed
     across SDK versions, so fall back to matching the status text that always
     appears in the message (e.g. "503 UNAVAILABLE. {...}").
+
+    A daily-quota 429 is deliberately excluded — see _is_daily_quota.
     """
+    if _is_daily_quota(exc):
+        return False
     code = getattr(exc, "code", None)
     if isinstance(code, int):
         return code in _RETRYABLE_STATUS
@@ -659,7 +678,18 @@ async def generate_for_job(job_id: str) -> None:
         # download). Duplicates are merged, then only "recommendation"-typed
         # items reach the CSV — views are logged and dropped. An empty result
         # still yields a header-only CSV.
-        await anyio.to_thread.run_sync(storage.download_file, media_key, media_path)
+        try:
+            await anyio.to_thread.run_sync(storage.download_file, media_key, media_path)
+        except Exception as exc:  # noqa: BLE001 — translate to a human message.
+            # claim_recommendations_generating already checks the object exists,
+            # so reaching here means it was swept between the click and now (the
+            # R2 jobs/ prefix has a 7-day lifecycle rule). Say so plainly rather
+            # than surfacing "404 HeadObject Not Found" to a user.
+            raise RuntimeError(
+                "This video's files have expired (artifacts are kept for 7 days), "
+                "so recommendations can no longer be generated for it. Process the "
+                "video again to get them."
+            ) from exc
         raw_items = await _extract_recommendations(media_path, video_title, mime_type)
         merged = merge_duplicate_stocks(raw_items)
         if len(merged) < len(raw_items):

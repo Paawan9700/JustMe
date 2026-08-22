@@ -23,7 +23,13 @@ Pipeline (matches the M6 spec):
   7. ffmpeg -f concat -safe 0 -i list -c copy final.mp4. Progress 90%.
   8. Upload final.mp4 to R2 at r2_key_final_video. Stamp
      artifacts.final_video_key on the job.
-  9. Transition to DONE (100%, "Your video is ready!").
+  9. Stream-copy final.mp4's audio to final_audio.m4a and upload it
+     (artifacts.final_audio_key) — the recommendations LLM reads audio, not
+     video. Best-effort.
+ 10. Reclaim the ephemeral intermediates: delete source.mp4 and the whole
+     snippets/ prefix, unsetting their keys. Best-effort. Together with
+     audio.wav (deleted in pipeline.py) that is 98% of a job's storage.
+ 11. Transition to DONE (100%, "Your video is ready!").
 
 Skip path: when source_video_key is null OR there are no segments for
 the selected speaker, we transition straight to DONE with
@@ -46,11 +52,12 @@ from typing import Any
 from worker.db import get_db
 from worker.state import progress, transition
 from worker.utils.ffmpeg import FFmpegError, detect_silence, run_ffmpeg
-from worker.utils.storage import download_file, upload_file
+from worker.utils.storage import delete_prefix, download_file, upload_file
 from shared.constants import (
     JobStatus,
     r2_key_final_audio,
     r2_key_final_video,
+    r2_prefix_ephemeral,
     r2_key_transcript,
     r2_key_transcription,
 )
@@ -405,6 +412,47 @@ def run_render(job_id: str, job_dir: Path) -> None:
             exc_info=True,
         )
 
+    # 10. Reclaim the ephemeral intermediates (best-effort).
+    #
+    # Both are dead at this point:
+    #   * source.mp4 (~485 MB) — the render is uploaded and there is NO re-render
+    #     path (select_speaker only accepts AWAITING_SELECTION), so nothing can
+    #     ever ask for it again.
+    #   * snippets/*.mp3 — only used by the pre-render speaker-selection UI.
+    #
+    # Together with audio.wav (deleted in pipeline.py) this is 98% of a job's
+    # storage, which is what keeps the bucket inside R2's free tier. The
+    # ephemeral/ lifecycle rule is only a backstop for jobs that crash or are
+    # abandoned before reaching here.
+    #
+    # One prefix delete covers source.mp4, snippets/ AND any audio.wav that
+    # process_video failed to remove.
+    #
+    # The artifact keys are unset alongside the objects so nothing keeps handing
+    # out presigned URLs to bytes that no longer exist: job_service hydrates
+    # speakers[].snippet_url off snippet_key, and the pipeline's resume check
+    # reads artifacts.source_video_key.
+    #
+    # Never fatal — the job has already succeeded and been uploaded.
+    try:
+        n_removed = delete_prefix(r2_prefix_ephemeral(job_id))
+        db.jobs.update_one(
+            {"job_id": job_id},
+            {"$unset": {
+                "artifacts.source_video_key": "",
+                "speakers.$[].snippet_key": "",
+            }},
+        )
+        logger.info(
+            "render[%s] reclaimed %d ephemeral object(s)", job_id, n_removed,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "render[%s] could not delete the ephemeral/ objects; the lifecycle "
+            "rule will reclaim them",
+            job_id, exc_info=True,
+        )
+
     total_dur = sum(s["end"] - s["start"] for s in cut_list)
     video_duration = duration_sec
     try:
@@ -439,7 +487,7 @@ def run_render(job_id: str, job_dir: Path) -> None:
             job_id, exc,
         )
 
-    # 9. Finish
+    # 11. Finish
     transition(
         job_id, JobStatus.DONE.value,
         stage="done", percent=100.0,

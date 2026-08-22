@@ -55,6 +55,7 @@ from worker.tasks import diarize as diarize_task
 from worker.tasks import ingest as ingest_task
 from worker.tasks import render as render_task
 from worker.tasks import snippets as snippets_task
+from worker.utils.storage import delete_file as r2_delete
 from worker.utils.storage import download_file as r2_download
 from worker.utils.storage import file_exists as r2_file_exists
 from shared.constants import JobStatus, r2_key_audio
@@ -235,6 +236,28 @@ def run_process_video(job_id: str) -> dict[str, Any]:
             logger.info(
                 "process_video[%s] snippets done in %.1fs",
                 job_id, time.perf_counter() - t0,
+            )
+
+        # ---- Reclaim audio.wav ------------------------------------------
+        # Diarization is the only reader (snippets are cut from source.mp4) and
+        # its output is already persisted to the `segments` collection plus
+        # transcript.json, so this ~351 MB file is now dead weight. Deleting it
+        # here frees the space in minutes instead of waiting for the ephemeral/
+        # lifecycle rule.
+        #
+        # Safe against resume: _audio_already_done() verifies the object with
+        # r2_file_exists(), so a re-run simply re-extracts it from source.mp4
+        # (cheap, local ffmpeg) rather than skipping the stage and failing.
+        #
+        # Best-effort: the job has succeeded, so cleanup must never fail it.
+        try:
+            r2_delete(r2_key_audio(job_id))
+            logger.info("process_video[%s] deleted ephemeral audio.wav", job_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "process_video[%s] could not delete audio.wav; the ephemeral/ "
+                "lifecycle rule will reclaim it",
+                job_id, exc_info=True,
             )
 
         # ---- Summary log ------------------------------------------------
