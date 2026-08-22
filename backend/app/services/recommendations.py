@@ -173,6 +173,24 @@ attached (the analyst commenting on someone else's call) — emit NO object for 
 those, not even as a "view". If the analyst names no stocks at all, return \
 {"stocks": []}.
 
+- SPLICED-IN OTHER SPEAKER. The transcript is a CUT of ONE speaker's segments \
+lifted out of a longer multi-speaker show, so at a cut seam a few seconds of \
+ANOTHER speaker can leak in. Tell the two apart by where the stock's name sits \
+relative to his own talk about it. When THIS analyst makes a call he leads into \
+the stock: he names it FIRST and then gives the levels, or names it MID-FLOW \
+while giving them — and either way he keeps talking about that stock \
+afterwards (reasoning, chart, follow-up). Leaked speech has no such shape: it \
+appears abruptly at the very END of the transcript, usually as its own last \
+line, the stock name arrives with none of this analyst's build-up before it and \
+nothing of his after it, and it often stops mid-sentence. Classify such a stock \
+as "view" so it is dropped — even when that trailing fragment does carry an \
+instruction and levels, because those levels are the other speaker's call, not \
+his.
+  This does NOT apply just because a stock is the last one discussed. If the \
+analyst genuinely works up to a closing call — transitions into it, gives \
+CMP/levels, explains it — that is a "recommendation" like any other. Only a \
+bare, lead-in-less trailing fragment is a splice.
+
 - If the SAME stock is discussed more than once, emit ONE object for it: for \
 each field use the LATEST value he states, and keep an earlier value where it \
 is not restated. Its "type" is "recommendation" if ANY of the mentions \
@@ -251,8 +269,13 @@ EXTRACT_USER_DIRECTIVE = (
     "knowledge; (3) copy numbers exactly as written, with no invented decimals; "
     '(4) never complete a number marked "[CUT OFF]" — output the digits shown + '
     '"*" (e.g. "166*") or leave it blank; (5) same stock discussed more than '
-    "once -> ONE object with the latest stated values. Every object MUST have "
-    '"type" and a short verbatim "evidence" quote.'
+    "once -> ONE object with the latest stated values; (6) a stock whose ONLY "
+    "mention is an abrupt fragment at the very END of the transcript, with no "
+    "lead-in before it and nothing after it, is another speaker spliced in at a "
+    'cut seam -> "view", even if that fragment carries levels — but a closing '
+    "call the speaker genuinely builds up to stays a "
+    '"recommendation". Every object MUST have "type" and a short verbatim '
+    '"evidence" quote.'
 )
 
 
