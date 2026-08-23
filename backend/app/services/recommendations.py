@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import random
+import re
 import tempfile
 import time
 from typing import Any
@@ -215,8 +216,27 @@ between buy and sell, choose "BUY".
 
 FIELD MEANINGS — the analyst states these in any order; match by meaning, not \
 position:
-- "cmp": the price the stock is trading at NOW, as he states it ("abhi 2020 \
-chal raha hai", "CMP is 2020").
+- "cmp": the price he gives for the stock as its current price ("abhi 2020 chal \
+raha hai", "CMP is 2020"). If he states no live price but DOES give a recent \
+traded price for THAT stock — a previous/yesterday's close ("kal 4586 ke aas-paas \
+closing hui"), or the level it is trading "around" — use that. Prefer the live \
+price when both are given, and keep a range as a range ("942-943"). That is the \
+only latitude in this field: the number must be one he states as a PRICE OF THAT \
+STOCK. NEVER take it from a different stock, and never from a stoploss, target, \
+support/resistance or other chart level. If he gives no price for the stock at \
+all, leave "" — a genuine recommendation can lack a CMP.
+  SANITY-CHECK THE PRICE AGAINST ITS OWN LEVELS. A trade setup has to hold \
+together: for a BUY the stoploss sits BELOW the current price and the targets \
+ABOVE it; for a SELL/short the stoploss sits ABOVE and the targets BELOW. Use \
+this ONLY to choose between numbers the speaker actually stated for THAT stock: \
+when more than one candidate price appears and you are unsure which is the CMP, \
+discard any candidate that makes the setup impossible — a "price" of 375 \
+alongside a stoploss of 1019 and targets of 1065/1080 cannot be that stock's \
+price — and keep the one that fits. NEVER use this to calculate, adjust, round \
+or invent a number, and never to complete a "[CUT OFF]" value: the arithmetic \
+only ever REJECTS a candidate, it never produces one. Do not look up or recall \
+any real-world price. If no stated candidate fits, leave "cmp" as ""; if one \
+fits but you remain unsure, keep it and append "*".
 - "stoploss": the level at which he says to exit if the trade goes against you \
 ("stop loss", "SL", "950 ka stoploss rakho").
 - "targets": the level(s) he expects the price to reach or says to book profit \
@@ -274,7 +294,13 @@ EXTRACT_USER_DIRECTIVE = (
     "lead-in before it and nothing after it, is another speaker spliced in at a "
     'cut seam -> "view", even if that fragment carries levels — but a closing '
     "call the speaker genuinely builds up to stays a "
-    '"recommendation". Every object MUST have "type" and a short verbatim '
+    '"recommendation"; (7) "cmp" may be a previous close or an "around" price '
+    "he states for THAT stock when he gives no live price — but it must never "
+    "be a number belonging to a different stock, nor a stoploss/target/chart "
+    "level; if two candidate prices appear, drop the one that makes the setup "
+    "impossible (BUY: stoploss below the price, targets above; SELL: the "
+    "reverse) — that check only ever REJECTS a candidate, it never invents or "
+    'recalculates one. Every object MUST have "type" and a short verbatim '
     '"evidence" quote.'
 )
 
@@ -439,6 +465,80 @@ def require_trade_fields(recs: list[dict]) -> tuple[list[dict], list[dict]]:
     return kept, demoted
 
 
+# Numbers as the LLM writes them: "1036-1037", "295 296", "T1: 1065; T2: 1080",
+# "438.5", "Rs.1905", "166*". The lookbehind is what keeps the "1" out of a "T1:"
+# label while still allowing a number after "." or "-" or a currency symbol, and
+# the decimal is consumed in one token so "438.5" is 438.5 and not [438, 5].
+_NUM_RE = re.compile(r"(?<![A-Za-z0-9])\d+(?:\.\d+)?")
+
+
+def _numbers(value: Any) -> list[float]:
+    """
+    Every number in one field, in order. Thousands separators are stripped only
+    when the comma sits BETWEEN digits ("1,036" -> 1036), so a comma used to
+    separate two values ("1638, 1640") still yields both.
+    """
+    text = re.sub(r"(?<=\d),(?=\d)", "", str(value or ""))
+    return [float(m.group()) for m in _NUM_RE.finditer(text)]
+
+
+def flag_inconsistent_cmp(recs: list[dict]) -> tuple[list[dict], list[dict]]:
+    """
+    Deterministic backstop for a CMP that contradicts its own trade levels.
+
+    A setup has to hold together: a BUY's stoploss sits below the price and its
+    targets above it; a SELL/short is the reverse. A row that violates that is
+    self-contradictory — you cannot buy at 375 with the stop at 1019 — and in
+    every real instance so far the offending number came from a DIFFERENT stock
+    ("1019" was AU Small Finance Bank's stoploss landing in Bharti Airtel's cmp;
+    "375 376" was a later stock's price landing in AU's). The prompt asks the
+    model to reject such a candidate itself; this catches the runs where it
+    doesn't, which a prompt rule alone cannot guarantee.
+
+    NOTHING IS DROPPED. A wrong number is recoverable from the video, a missing
+    row is not, so the row is kept and its cmp gets the "*" uncertainty marker
+    the prompt already defines. We cannot know WHICH of the three numbers is the
+    bad one, so the marker goes on cmp — the field this check exists to protect,
+    and the only one whose definition is loose enough to pull in a stray price —
+    and the whole row is logged for inspection.
+
+    Deliberately conservative, to keep false positives at zero: a row missing any
+    of the three fields is left alone (nothing to compare), and the target bound
+    uses the FURTHEST target so a T1 quoted just the wrong side of the price does
+    not trip it. Verified against all 14 correct rows seen across the three test
+    videos — none flagged — while catching both real bad rows.
+
+    Returns (items, flagged); `items` always has the same length as `recs`.
+    """
+
+    def _mark(item: dict) -> dict:
+        cmp_text = str(item.get("cmp") or "").strip()
+        if not cmp_text.endswith("*"):
+            item = {**item, "cmp": f"{cmp_text}*"}
+        return item
+
+    items: list[dict] = []
+    flagged: list[dict] = []
+    for item in recs:
+        cmps = _numbers(item.get("cmp"))
+        sls = _numbers(item.get("stoploss"))
+        tgs = _numbers(item.get("targets"))
+        if not (cmps and sls and tgs):
+            items.append(item)
+            continue
+        cmp_lo, cmp_hi = min(cmps), max(cmps)
+        if str(item.get("action") or "").strip().upper() == "SELL":
+            bad = cmp_hi >= min(sls) or cmp_lo <= min(tgs)
+        else:  # BUY (or unspecified, treated as BUY, matching require_trade_fields)
+            bad = cmp_lo <= max(sls) or cmp_hi >= max(tgs)
+        if bad:
+            flagged.append(item)
+            items.append(_mark(item))
+        else:
+            items.append(item)
+    return items, flagged
+
+
 def partition_by_type(items: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     """
     Split classified items into (recommendations, views, invalid). Only
@@ -503,6 +603,8 @@ def _thinking_off(types) -> Any | None:
     ThinkingConfig that turns the model's thinking down as far as it allows, or
     None for a model family that takes no thinking config at all (in which case
     the field must be omitted rather than sent as None-with-a-value).
+
+    PASS 1 ONLY. Pass 2 needs its thinking — see the note at the call site.
 
     The knob is family-specific and NOT interchangeable: gemini-3 takes
     `thinking_level` and rejects a numeric budget, while gemini-2.5-flash (the
@@ -594,41 +696,48 @@ async def _extract_recommendations(
             await anyio.sleep(_GEMINI_FILE_POLL_INTERVAL_S)
             uploaded = await client.aio.files.get(name=uploaded.name)
 
-        # Both passes are TRANSDUCTION, not reasoning: pass 1 writes down what it
-        # hears, pass 2 copies fields out of that text. Gemini 3's default
-        # thinking level actively hurts both. Measured 2026-08-23 on the 3-min
-        # clip from job 672e5e1a (13 runs at default, 7 with thinking low):
-        #   default thinking   pass 1 14-98s, pass 2 12-65s; EVERY run differed.
-        #                      "forty-five eighty-six" came out split as "45 86"
-        #                      (pass 2 then has to re-join it, and that is where
-        #                      1905 became 1019), and the stock name was dropped
-        #                      3 times in 13 — the "Ethos"-for-"Eternal" class of
-        #                      error that put a wrong stock in a user's CSV.
-        #   thinking low       pass 1 ~7-17s, pass 2 ~3s; 7/7 runs exact, i.e.
-        #                      correct name and all 12 numbers.
-        # Overthinking a verbatim task makes the model "tidy" what it heard;
-        # with thinking off it simply writes it down.
-        thinking = _thinking_off(types)
-
-        # temperature=0 is safe ONLY in combination with thinking off. On its own
-        # against a Gemini 3 thinking model it sends the reasoning into a loop
-        # until it hits an internal cap — measured ~62,913 thinking tokens and
-        # ~195s per pass, 3/3 runs, and still inaccurate. That is the degradation
-        # Google's "don't lower temperature on Gemini 3" guidance refers to, and
-        # it lives in the thinking; with thinking disabled the loop cannot occur.
-        # Pinned so the same audio yields the same CSV instead of a fresh roll of
-        # the dice on every click of Generate.
-        temperature = 0
+        # THE TWO PASSES NEED OPPOSITE SETTINGS. Measured 2026-08-23; do not
+        # collapse them into one config (that regressed pass 2 — see below).
+        #
+        # Pass 1 is TRANSDUCTION: write down what you hear. Thinking makes the
+        # model "tidy" the audio instead of transcribing it. On job 672e5e1a
+        # (3-min clip), 13 runs at default vs 7 with thinking low:
+        #   default thinking  14-98s; EVERY run differed. Numbers came out split
+        #                     ("forty-five eighty-six" -> "45 86") and the stock
+        #                     name was dropped 3 times in 13 — the same
+        #                     instability that put "Ethos" in a user's CSV where
+        #                     the speaker said "Eternal".
+        #   thinking low      ~7-17s; 7/7 runs exact (correct name, all 12
+        #                     numbers). temperature=0 is safe here precisely
+        #                     BECAUSE thinking is off.
+        #
+        # Pass 2 is REASONING: work out which levels belong to which stock, and
+        # whether a mention is a call or a view. Thinking is load-bearing. With
+        # thinking low it still filled evidence/type/action/cmp but silently
+        # OMITTED "stoploss" and "targets" whenever the levels sat far from the
+        # instruction — 2/2 runs on job 1389b48f dropped a genuine APL Apollo
+        # Tubes call (SL 1805, targets 1855/1870 quoted in its own evidence!)
+        # because require_trade_fields then saw an incomplete BUY. Default
+        # thinking filled both fields 2/2. So pass 2 keeps the model's default.
+        #
+        # And pass 2 must keep its DEFAULT temperature: temperature=0 with
+        # thinking enabled loops the reasoning to an internal cap — measured
+        # ~62,910 thinking tokens / 214s on pass 2, and ~62,913 / ~195s on
+        # pass 1, 3/3 runs. That is what Google's "don't lower temperature on
+        # Gemini 3" guidance is about, and it lives in the thinking.
+        thinking_pass1 = _thinking_off(types)
+        temperature_pass1 = 0
+        temperature_pass2 = 0 if settings.gemini_model.startswith("gemini-2") else None
 
         # ---- Pass 1: faithful verbatim transcription from the AUDIO ----
         # media_resolution only means anything for video input; when we send the
         # audio-only sidecar there are no frames to down-sample.
         tx_config: dict[str, Any] = {
             "system_instruction": TRANSCRIBE_SYSTEM_PROMPT,
-            "temperature": temperature,
+            "temperature": temperature_pass1,
         }
-        if thinking is not None:
-            tx_config["thinking_config"] = thinking
+        if thinking_pass1 is not None:
+            tx_config["thinking_config"] = thinking_pass1
         if mime_type.startswith("video/"):
             tx_config["media_resolution"] = types.MediaResolution.MEDIA_RESOLUTION_LOW
         tx_resp = await _generate_with_retry(
@@ -650,8 +759,7 @@ async def _extract_recommendations(
             system_instruction=EXTRACT_SYSTEM_PROMPT,
             response_mime_type="application/json",
             response_schema=_build_extract_schema(types),
-            temperature=temperature,
-            thinking_config=thinking,  # None = field omitted, see _thinking_off
+            temperature=temperature_pass2,
         )
         extract_contents = [
             f"Video title: {video_title or ''}\n\n"
@@ -768,6 +876,19 @@ async def generate_for_job(job_id: str) -> None:
             )
         items, views, invalid = partition_by_type(merged)
         items, incomplete = require_trade_fields(items)
+        items, inconsistent = flag_inconsistent_cmp(items)
+        if inconsistent:
+            logger.warning(
+                "recommendations[%s] %d row(s) have a cmp that contradicts their "
+                "own levels (cmp marked with *, row KEPT): %s",
+                job_id, len(inconsistent),
+                "; ".join(
+                    f"{d.get('stock_name') or '<unnamed>'} "
+                    f"cmp={d.get('cmp')!r} sl={d.get('stoploss')!r} "
+                    f"tg={d.get('targets')!r}"
+                    for d in inconsistent
+                ),
+            )
         for bad in invalid:
             logger.warning(
                 'recommendations[%s] item with missing/unknown "type"=%r '

@@ -34,7 +34,9 @@ for var in (
 from app.services.recommendations import (  # noqa: E402
     CSV_COLUMNS,
     _parse_stocks_payload,
+    _numbers,
     build_recommendations_csv,
+    flag_inconsistent_cmp,
     merge_duplicate_stocks,
     partition_by_type,
     require_trade_fields,
@@ -391,6 +393,97 @@ def test_pipeline_view_then_rec_yields_one_row():
     assert row[CSV_COLUMNS.index("TARGETS")] == "T1: 2120"
     assert [v["stock_name"] for v in views] == ["Paytm"]
     assert invalid == []
+
+
+# ---------------------------------------------------------------------------
+# flag_inconsistent_cmp — deterministic backstop for a cmp from another stock
+# ---------------------------------------------------------------------------
+
+def test_numbers_parses_llm_number_formats():
+    assert _numbers("T1: 1065; T2: 1080") == [1065.0, 1080.0]   # "T1" is not a number
+    assert _numbers("438.5") == [438.5]                          # decimal stays whole
+    assert _numbers("1036-1037") == [1036.0, 1037.0]
+    assert _numbers("295 296") == [295.0, 296.0]
+    assert _numbers("1638, 1640") == [1638.0, 1640.0]            # comma+space = two values
+    assert _numbers("1,036") == [1036.0]                         # comma between digits = separator
+    assert _numbers("Rs.1905") == [1905.0]
+    assert _numbers("166*") == [166.0]
+    assert _numbers("") == [] and _numbers(None) == []
+
+
+def test_flags_the_two_real_cross_stock_cmp_bugs():
+    """Both rows actually shipped to a user; both are arithmetically impossible."""
+    # "1019" was AU Small Finance Bank's stoploss, landing in Bharti Airtel's cmp.
+    airtel = {"stock_name": "Bharti Airtel", "action": "BUY", "cmp": "1019",
+              "stoploss": "1890", "targets": "T1: 1935; T2: 1950"}
+    # "375 376" was a later stock's price, landing in AU Small Finance Bank's cmp.
+    au = {"stock_name": "AU Small Finance Bank", "action": "BUY", "cmp": "375 376",
+          "stoploss": "1019", "targets": "T1: 1065; T2: 1080"}
+    items, flagged = flag_inconsistent_cmp([airtel, au])
+    assert [f["stock_name"] for f in flagged] == ["Bharti Airtel", "AU Small Finance Bank"]
+    assert [i["cmp"] for i in items] == ["1019*", "375 376*"]     # marked, not dropped
+    assert len(items) == 2
+
+
+def test_no_false_positives_on_every_verified_correct_row():
+    """The 14 correct rows observed across the three test videos must all pass."""
+    good = [
+        ("Titan", "4586", "4530", "T1: 4700; T2: 4750"),
+        ("Eternal", "295-296", "283", "T1: 320; T2: 330"),
+        ("Sun Pharma", "1923-1924", "1905", "T1: 1960; T2: 1985"),
+        ("Bharti Airtel", "1905", "1890", "T1: 1935; T2: 1950"),
+        ("AU Small Finance Bank", "1036-1037", "1019", "T1: 1065; T2: 1080"),
+        ("PB Fintech", "1638 1640", "1620", "T1: 1670; T2: 1685"),
+        ("APL Apollo Tubes", "1816", "1805", "T1: 1855; T2: 1870"),
+        ("LIC", "438.5", "425", "T1: 460; T2: 480"),
+        ("Motilal Oswal", "942", "920", "T1: 975; T2: 990"),
+        ("Bandhan Bank", "203.3", "198", "T1: 211; T2: 215"),
+        ("Adani Green Energy", "1520", "1500", "T1: 1560; T2: 1590"),
+        ("Sobha Limited", "1485", "1430", "T1: 1700; T2: 1750"),
+    ]
+    recs = [{"stock_name": n, "action": "BUY", "cmp": c, "stoploss": s, "targets": t}
+            for n, c, s, t in good]
+    items, flagged = flag_inconsistent_cmp(recs)
+    assert flagged == [], f"false positives: {[f['stock_name'] for f in flagged]}"
+    assert [i["cmp"] for i in items] == [c for _, c, _, _ in good]  # untouched
+
+
+def test_sell_direction_is_inverted_not_flagged():
+    """A short: stoploss ABOVE the price, targets BELOW. Must not be flagged."""
+    sell = {"stock_name": "Axis Bank June Futures", "action": "SELL",
+            "cmp": "1000", "stoploss": "1030", "targets": "T1: 960; T2: 940"}
+    items, flagged = flag_inconsistent_cmp([sell])
+    assert flagged == [] and items[0]["cmp"] == "1000"
+    # ...but the same numbers labelled BUY are impossible.
+    _, flagged_buy = flag_inconsistent_cmp([{**sell, "action": "BUY"}])
+    assert len(flagged_buy) == 1
+
+
+def test_incomparable_rows_are_left_alone():
+    """Missing any of the three fields = nothing to compare = no flag, no change."""
+    rows = [
+        {"stock_name": "A", "action": "BUY", "cmp": "", "stoploss": "10", "targets": "T1: 20"},
+        {"stock_name": "B", "action": "BUY", "cmp": "15", "stoploss": "", "targets": "T1: 20"},
+        {"stock_name": "C", "action": "SELL", "cmp": "15", "stoploss": "20", "targets": ""},
+    ]
+    items, flagged = flag_inconsistent_cmp(rows)
+    assert flagged == []
+    assert items == rows
+
+
+def test_existing_asterisk_is_not_doubled():
+    row = {"stock_name": "X", "action": "BUY", "cmp": "375*",
+           "stoploss": "1019", "targets": "T1: 1065"}
+    items, flagged = flag_inconsistent_cmp([row])
+    assert len(flagged) == 1
+    assert items[0]["cmp"] == "375*"
+
+
+def test_flagging_does_not_mutate_the_caller_dict():
+    row = {"stock_name": "X", "action": "BUY", "cmp": "375",
+           "stoploss": "1019", "targets": "T1: 1065"}
+    flag_inconsistent_cmp([row])
+    assert row["cmp"] == "375"
 
 
 if __name__ == "__main__":
