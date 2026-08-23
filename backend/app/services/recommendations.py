@@ -498,6 +498,29 @@ def _is_transient(exc: Exception) -> bool:
     return any(str(s) in text for s in _RETRYABLE_STATUS) or "UNAVAILABLE" in text
 
 
+def _thinking_off(types) -> Any | None:
+    """
+    ThinkingConfig that turns the model's thinking down as far as it allows, or
+    None for a model family that takes no thinking config at all (in which case
+    the field must be omitted rather than sent as None-with-a-value).
+
+    The knob is family-specific and NOT interchangeable: gemini-3 takes
+    `thinking_level` and rejects a numeric budget, while gemini-2.5-flash (the
+    config default / rollback baseline) takes `thinking_budget=0` and rejects
+    `thinking_level`. Sending the wrong one is a 400, so it is chosen by prefix
+    and anything unrecognised gets no thinking config — the model's own default,
+    i.e. exactly today's behavior.
+
+    `types` is passed in because google.genai is imported lazily (see the caller).
+    """
+    model = settings.gemini_model
+    if model.startswith("gemini-3"):
+        return types.ThinkingConfig(thinking_level="low")
+    if model.startswith("gemini-2.5"):
+        return types.ThinkingConfig(thinking_budget=0)
+    return None
+
+
 async def _generate_with_retry(client, *, model, contents, config, what: str):
     """
     Call generate_content, retrying transient failures with exponential backoff
@@ -571,11 +594,31 @@ async def _extract_recommendations(
             await anyio.sleep(_GEMINI_FILE_POLL_INTERVAL_S)
             uploaded = await client.aio.files.get(name=uploaded.name)
 
-        # Gemini 2.x: pin temperature=0 (the battle-tested decode behavior).
-        # Gemini 3+ thinking models: leave temperature at its default — Google
-        # explicitly recommends against lowering it (it can degrade or loop
-        # the output). None means the field is simply not sent.
-        temperature = 0 if settings.gemini_model.startswith("gemini-2") else None
+        # Both passes are TRANSDUCTION, not reasoning: pass 1 writes down what it
+        # hears, pass 2 copies fields out of that text. Gemini 3's default
+        # thinking level actively hurts both. Measured 2026-08-23 on the 3-min
+        # clip from job 672e5e1a (13 runs at default, 7 with thinking low):
+        #   default thinking   pass 1 14-98s, pass 2 12-65s; EVERY run differed.
+        #                      "forty-five eighty-six" came out split as "45 86"
+        #                      (pass 2 then has to re-join it, and that is where
+        #                      1905 became 1019), and the stock name was dropped
+        #                      3 times in 13 — the "Ethos"-for-"Eternal" class of
+        #                      error that put a wrong stock in a user's CSV.
+        #   thinking low       pass 1 ~7-17s, pass 2 ~3s; 7/7 runs exact, i.e.
+        #                      correct name and all 12 numbers.
+        # Overthinking a verbatim task makes the model "tidy" what it heard;
+        # with thinking off it simply writes it down.
+        thinking = _thinking_off(types)
+
+        # temperature=0 is safe ONLY in combination with thinking off. On its own
+        # against a Gemini 3 thinking model it sends the reasoning into a loop
+        # until it hits an internal cap — measured ~62,913 thinking tokens and
+        # ~195s per pass, 3/3 runs, and still inaccurate. That is the degradation
+        # Google's "don't lower temperature on Gemini 3" guidance refers to, and
+        # it lives in the thinking; with thinking disabled the loop cannot occur.
+        # Pinned so the same audio yields the same CSV instead of a fresh roll of
+        # the dice on every click of Generate.
+        temperature = 0
 
         # ---- Pass 1: faithful verbatim transcription from the AUDIO ----
         # media_resolution only means anything for video input; when we send the
@@ -584,6 +627,8 @@ async def _extract_recommendations(
             "system_instruction": TRANSCRIBE_SYSTEM_PROMPT,
             "temperature": temperature,
         }
+        if thinking is not None:
+            tx_config["thinking_config"] = thinking
         if mime_type.startswith("video/"):
             tx_config["media_resolution"] = types.MediaResolution.MEDIA_RESOLUTION_LOW
         tx_resp = await _generate_with_retry(
@@ -606,6 +651,7 @@ async def _extract_recommendations(
             response_mime_type="application/json",
             response_schema=_build_extract_schema(types),
             temperature=temperature,
+            thinking_config=thinking,  # None = field omitted, see _thinking_off
         )
         extract_contents = [
             f"Video title: {video_title or ''}\n\n"
