@@ -11,6 +11,7 @@ import {
   Plus,
 } from "lucide-react";
 import { listJobs } from "../lib/api";
+import { useAuth } from "../lib/auth";
 import ProgressBar from "../components/ProgressBar";
 
 const PROCESSING_STATES = new Set([
@@ -147,6 +148,10 @@ function groupJobsByDay(jobs) {
 }
 
 export default function MyJobs() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
+  // Admin-only: show every user's jobs instead of just your own.
+  const [everyone, setEveryone] = useState(false);
   const [jobs, setJobs] = useState(null); // null = not loaded yet
   const [loadError, setLoadError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -154,7 +159,7 @@ export default function MyJobs() {
   const load = useCallback(async () => {
     setRefreshing(true);
     try {
-      const data = await listJobs();
+      const data = await listJobs({ everyone });
       setJobs(Array.isArray(data) ? data : []);
       setLoadError(null);
     } catch (err) {
@@ -162,13 +167,13 @@ export default function MyJobs() {
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [everyone]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const data = await listJobs();
+        const data = await listJobs({ everyone });
         if (cancelled) return;
         setJobs(Array.isArray(data) ? data : []);
         setLoadError(null);
@@ -179,7 +184,7 @@ export default function MyJobs() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [everyone]);
 
   // ---- loading (first paint) -------------------------------------------
   if (jobs === null && !loadError) {
@@ -225,19 +230,45 @@ export default function MyJobs() {
             Library
           </span>
           <h1 className="mt-2 text-2xl font-bold tracking-tight text-white sm:text-3xl">
-            Your Videos
+            {everyone ? "Everyone\u2019s Videos" : "Your Videos"}
           </h1>
         </div>
-        <button
-          type="button"
-          className="btn-ghost"
-          onClick={load}
-          disabled={refreshing}
-          data-testid="myjobs-refresh"
-        >
-          <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          {isAdmin && (
+            <div
+              className="inline-flex rounded-xl border border-white/10 bg-white/[0.02] p-1 font-mono text-[11px]"
+              role="group"
+              aria-label="Whose videos to show"
+              data-testid="myjobs-scope"
+            >
+              {[["Mine", false], ["Everyone", true]].map(([label, value]) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={() => setEveryone(value)}
+                  aria-pressed={everyone === value}
+                  className={`rounded-lg px-3 py-1.5 transition-colors ${
+                    everyone === value
+                      ? "bg-accent/15 text-white"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+          <button
+            type="button"
+            className="btn-ghost"
+            onClick={load}
+            disabled={refreshing}
+            data-testid="myjobs-refresh"
+          >
+            <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Empty state */}
@@ -301,6 +332,14 @@ export default function MyJobs() {
                             >
                               {formatProcessedIST(job.created_at)}
                             </p>
+                            {everyone && (
+                              <p
+                                className="mt-1 truncate font-mono text-xs text-accent-soft"
+                                data-testid="myjobs-owner"
+                              >
+                                {job.user_email || "no owner yet"}
+                              </p>
+                            )}
                           </div>
                           <div className="flex shrink-0 items-center gap-3">
                             <StatusBadge status={job.status} />

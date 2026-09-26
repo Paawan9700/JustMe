@@ -77,11 +77,21 @@ class JobSummaryResponse(BaseModel):
     status: str
     video_title: Optional[str] = None
     youtube_url: str  # title fallback in UI (video_title is null early on)
+    user_email: Optional[str] = None  # owner; shown in the admin "everyone" view
     duration_sec: int = 0
     progress_percent: float = 0.0  # flattened from progress.percent
     selected_speaker: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+
+class UsageResponse(BaseModel):
+    """Today's usage for the signed-in user. Nulls mean "no limit" (admin)."""
+    daily_limit: Optional[int] = None
+    used_today: int = 0
+    remaining_today: Optional[int] = None
+    max_video_hours: int
+    resets_at: datetime  # next IST midnight, as UTC
 
 
 class SelectSpeakerResponse(BaseModel):

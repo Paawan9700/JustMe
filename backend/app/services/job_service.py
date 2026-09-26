@@ -39,18 +39,26 @@ logger = logging.getLogger(__name__)
 # Creation
 # ---------------------------------------------------------------------------
 
-async def create_job(youtube_url: str) -> dict[str, Any]:
+async def create_job(
+    youtube_url: str, *, user_id: str, user_email: str, max_video_hours: int,
+) -> dict[str, Any]:
     """
     Insert a new job document with status=QUEUED and return it.
 
     `task_id` is left as None — the caller fills it in after enqueuing
-    the Celery task (see api/jobs.py).
+    the Celery task (see api/jobs.py). `user_email` is denormalised next to
+    `user_id` so the admin "everyone" list can show whose job it is without
+    a join. `max_video_hours` is this job's length cap, enforced by the
+    worker at ingest (see services/limits.py).
     """
     db = get_db()
     now = datetime.now(timezone.utc)
 
     doc = {
         "job_id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "user_email": user_email,
+        "max_video_hours": int(max_video_hours),
         "youtube_url": youtube_url,
         "video_title": None,
         "duration_sec": 0,
@@ -99,19 +107,21 @@ async def get_job_raw(job_id: str) -> dict[str, Any] | None:
     return doc
 
 
-async def list_jobs(limit: int = 100) -> list[dict[str, Any]]:
+async def list_jobs(limit: int = 100, *, user_id: str | None = None) -> list[dict[str, Any]]:
     """
     Return recent jobs (newest first) as lightweight summary dicts for the
     My Jobs list. Deliberately does NOT hydrate presigned URLs — a projection
     keeps this cheap and avoids per-job R2 signing (contrast get_job_hydrated).
 
-    Sort is index-backed by `created_at_idx` (ascending index serves the
-    descending walk), so no new index is needed.
+    `user_id` scopes the list to one owner (served by `user_created_idx`);
+    None lists everyone's jobs (admin view, served by `created_at_idx`).
     """
     db = get_db()
+    query: dict[str, Any] = {"user_id": user_id} if user_id is not None else {}
     projection = {
         "_id": 0,
         "job_id": 1,
+        "user_email": 1,
         "status": 1,
         "video_title": 1,
         "youtube_url": 1,
@@ -121,11 +131,35 @@ async def list_jobs(limit: int = 100) -> list[dict[str, Any]]:
         "created_at": 1,
         "updated_at": 1,
     }
-    cursor = db.jobs.find({}, projection).sort("created_at", -1).limit(limit)
+    cursor = db.jobs.find(query, projection).sort("created_at", -1).limit(limit)
     docs = await cursor.to_list(length=limit)
     for d in docs:
         d["progress_percent"] = (d.pop("progress", None) or {}).get("percent", 0.0)
     return docs
+
+
+async def count_jobs_since(user_id: str, since: datetime) -> int:
+    """
+    Jobs this user created at/after `since` that have not FAILED — the
+    daily-limit counter (services/limits.py). Served by user_created_idx.
+    """
+    db = get_db()
+    return await db.jobs.count_documents({
+        "user_id": user_id,
+        "created_at": {"$gte": since},
+        "status": {"$ne": JobStatus.FAILED.value},
+    })
+
+
+async def get_job_owner(job_id: str) -> dict[str, Any] | None:
+    """
+    Cheap ownership probe: {"user_id": ...} (user_id absent on pre-auth jobs)
+    or None if the job doesn't exist. Routes call this BEFORE
+    get_job_hydrated so a non-owner never triggers the stall repair or
+    presigned-URL minting for someone else's job.
+    """
+    db = get_db()
+    return await db.jobs.find_one({"job_id": job_id}, {"_id": 0, "user_id": 1})
 
 
 # Statuses in which a worker is expected to be actively writing progress.
@@ -576,7 +610,9 @@ async def set_recommendations_status(
 __all__ = [
     "ALLOWED_TRANSITIONS",
     "create_job",
+    "count_jobs_since",
     "get_job_hydrated",
+    "get_job_owner",
     "get_job_raw",
     "list_jobs",
     "select_speaker",

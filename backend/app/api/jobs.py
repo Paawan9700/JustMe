@@ -5,19 +5,25 @@ HTTP endpoints for job lifecycle:
     GET  /api/jobs                          - list recent jobs (My Jobs)
     GET  /api/jobs/{job_id}                 - read job + hydrated URLs
     POST /api/jobs/{job_id}/select-speaker  - user picks their voice
+    POST /api/jobs/{job_id}/generate-recommendations
 
-All routes are mounted under /api 
+All routes are mounted under /api and require a signed-in user
+(`get_current_user`). Jobs are private to their owner; admins can see and
+open everyone's. A job you may not access is reported as 404, not 403, so
+job ids can't be probed for existence.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from typing import Any
 from urllib.parse import urlparse
 
 import anyio.to_thread
-from fastapi import APIRouter, BackgroundTasks, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
+from app.api.deps import get_current_user
 from app.core.config import settings
 from app.models.job import (
     GenerateRecommendationsResponse,
@@ -28,7 +34,7 @@ from app.models.job import (
     SelectSpeakerRequest,
     SelectSpeakerResponse,
 )
-from app.services import job_service, recommendations
+from app.services import auth, job_service, limits, recommendations
 from app.services.queue import enqueue_process_video, enqueue_render_video
 
 logger = logging.getLogger(__name__)
@@ -112,16 +118,44 @@ def _validate_youtube_url(url: str) -> tuple[bool, str | None]:
 
 
 # ---------------------------------------------------------------------------
+# Ownership
+# ---------------------------------------------------------------------------
+
+async def _require_job_access(job_id: str, user: dict[str, Any]) -> None:
+    """404 unless the job exists AND this user owns it (or is an admin)."""
+    owner = await job_service.get_job_owner(job_id)
+    if owner is None or not auth.can_access(owner, user):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+
+# ---------------------------------------------------------------------------
 # POST /api/jobs
 # ---------------------------------------------------------------------------
 
 @router.post("", response_model=JobCreateResponse, status_code=status.HTTP_201_CREATED)
-async def create_job(payload: JobCreateRequest) -> JobCreateResponse:
+async def create_job(
+    payload: JobCreateRequest, user: dict[str, Any] = Depends(get_current_user),
+) -> JobCreateResponse:
     ok, reason = _validate_youtube_url(payload.youtube_url)
     if not ok:
         raise HTTPException(status_code=400, detail=reason)
 
-    job = await job_service.create_job(payload.youtube_url)
+    usage = await limits.usage_for(user)
+    if usage["remaining_today"] is not None and usage["remaining_today"] <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"You've used all {usage['daily_limit']} videos for today. "
+                "Your limit resets at midnight IST."
+            ),
+        )
+
+    job = await job_service.create_job(
+        payload.youtube_url,
+        user_id=user["user_id"],
+        user_email=user["email"],
+        max_video_hours=usage["max_video_hours"],
+    )
 
     # Enqueue the worker task. If the dispatch backend (Modal or Redis) is
     # unreachable, surface a 502 so the client knows the job won't progress
@@ -156,8 +190,17 @@ async def create_job(payload: JobCreateRequest) -> JobCreateResponse:
 # ---------------------------------------------------------------------------
 
 @router.get("", response_model=list[JobSummaryResponse])
-async def list_jobs(limit: int = 100) -> list[JobSummaryResponse]:
-    docs = await job_service.list_jobs(limit=limit)
+async def list_jobs(
+    limit: int = 100,
+    scope: str = "mine",
+    user: dict[str, Any] = Depends(get_current_user),
+) -> list[JobSummaryResponse]:
+    # scope=all is the admin "everyone" view; for anyone else it quietly
+    # falls back to their own jobs rather than erroring.
+    everyone = scope == "all" and user.get("role") == "admin"
+    docs = await job_service.list_jobs(
+        limit=limit, user_id=None if everyone else user["user_id"],
+    )
     return [JobSummaryResponse(**d) for d in docs]
 
 
@@ -166,7 +209,8 @@ async def list_jobs(limit: int = 100) -> list[JobSummaryResponse]:
 # ---------------------------------------------------------------------------
 
 @router.get("/{job_id}", response_model=JobResponse)
-async def get_job(job_id: str) -> JobResponse:
+async def get_job(job_id: str, user: dict[str, Any] = Depends(get_current_user)) -> JobResponse:
+    await _require_job_access(job_id, user)
     doc = await job_service.get_job_hydrated(job_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -180,7 +224,12 @@ async def get_job(job_id: str) -> JobResponse:
 # ---------------------------------------------------------------------------
 
 @router.post("/{job_id}/select-speaker", response_model=SelectSpeakerResponse)
-async def select_speaker(job_id: str, payload: SelectSpeakerRequest) -> SelectSpeakerResponse:
+async def select_speaker(
+    job_id: str,
+    payload: SelectSpeakerRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> SelectSpeakerResponse:
+    await _require_job_access(job_id, user)
     result = await job_service.select_speaker(job_id, payload.speaker_label)
 
     if not result["ok"]:
@@ -226,13 +275,16 @@ async def select_speaker(job_id: str, payload: SelectSpeakerRequest) -> SelectSp
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def generate_recommendations(
-    job_id: str, background_tasks: BackgroundTasks
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    user: dict[str, Any] = Depends(get_current_user),
 ) -> GenerateRecommendationsResponse:
     """
     Kick off LLM extraction of stock recommendations from the job's final video.
     Runs as an in-process background task; the client polls GET /api/jobs/{id}
     and reads `recommendations_status` / `recommendations_url`.
     """
+    await _require_job_access(job_id, user)
     # Fail fast if the feature isn't configured — don't enter GENERATING.
     if not settings.gemini_api_key:
         raise HTTPException(

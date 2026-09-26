@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
@@ -10,7 +10,7 @@ import {
   TrendingUp,
   AlertTriangle,
 } from "lucide-react";
-import { createJob } from "../lib/api";
+import { createJob, getUsage } from "../lib/api";
 
 const STEPS = [
   { icon: Link2, title: "Paste a link", body: "Drop any long YouTube video." },
@@ -19,11 +19,34 @@ const STEPS = [
   { icon: TrendingUp, title: "Get insights", body: "Turn your words into stock insights." },
 ];
 
+// "Up to 5 hours per video · 2 of 5 videos left today" — or, for an admin
+// (no daily limit), just the length cap.
+function usageLine(usage) {
+  if (!usage) return null;
+  const hours = `Videos up to ${usage.max_video_hours} hours, including past livestreams.`;
+  if (usage.daily_limit == null) return `${hours} No daily limit (admin).`;
+  const left = usage.remaining_today;
+  return `${hours} ${left} of ${usage.daily_limit} video${usage.daily_limit === 1 ? "" : "s"} left today — resets at midnight IST.`;
+}
+
 export default function Home() {
   const [url, setUrl] = useState("");
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [usage, setUsage] = useState(null);
   const navigate = useNavigate();
+
+  // Best-effort: if it fails, the static helper text below still shows, and
+  // POST /api/jobs enforces the limits regardless.
+  useEffect(() => {
+    let cancelled = false;
+    getUsage()
+      .then((u) => { if (!cancelled) setUsage(u); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  const outOfVideos = usage?.remaining_today === 0;
 
   async function onSubmit(e) {
     e.preventDefault();
@@ -36,6 +59,7 @@ export default function Home() {
     } catch (err) {
       setError(err.message || "Something went wrong");
       setSubmitting(false);
+      if (err.status === 429) getUsage().then(setUsage).catch(() => {});
     }
   }
 
@@ -101,7 +125,7 @@ export default function Home() {
             whileHover={{ y: -2 }}
             whileTap={{ scale: 0.98 }}
             className="btn-primary px-6 py-3.5"
-            disabled={submitting || !url.trim()}
+            disabled={submitting || !url.trim() || outOfVideos}
             data-testid="get-started-btn"
           >
             {submitting ? (
@@ -134,7 +158,7 @@ export default function Home() {
           className="mt-4 font-mono text-xs text-slate-600"
           data-testid="home-helper"
         >
-          Handles videos up to 15 hours, including past livestreams.
+          {usageLine(usage) || "Handles long videos, including past livestreams."}{" "}
           Currently-live broadcasts aren&rsquo;t supported.
         </p>
       </motion.form>

@@ -15,7 +15,9 @@ import anyio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.auth import router as auth_router
 from app.api.jobs import router as jobs_router
+from app.api.usage import router as usage_router
 from app.db.mongo import close_db, init_db, ping as mongo_ping
 from app.services.storage import get_storage
 
@@ -92,4 +94,6 @@ async def api_root():
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
+app.include_router(auth_router)
 app.include_router(jobs_router)
+app.include_router(usage_router)

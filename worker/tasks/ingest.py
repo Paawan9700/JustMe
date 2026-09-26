@@ -9,7 +9,9 @@ Responsibilities:
   1. Extract metadata WITHOUT downloading and validate:
      - is_live == True -> reject (returns user-facing message from
                           shared.constants.LIVE_STREAM_REJECT_MESSAGE)
-     - duration > MAX_VIDEO_HOURS * 3600 -> reject
+     - duration > the job's max_video_hours * 3600 -> reject (see
+       resolve_max_video_hours: stamped per job by the API, 5 h for
+       regular users; MAX_VIDEO_HOURS is the fallback for older jobs)
      Completed past livestreams (is_live=False OR was_live=True) are
      allowed normally.
   2. Persist video_title and duration_sec on the job document.
@@ -82,8 +84,10 @@ def download_video(job_id: str, youtube_url: str, job_dir: Path) -> Path:
     if info.get("is_live") is True:
         raise IngestError("LIVE_STREAM", LIVE_STREAM_REJECT_MESSAGE)
 
+    db = get_db()
     duration_sec = int(info.get("duration") or 0)
-    max_hours = int(os.environ.get("MAX_VIDEO_HOURS", "15"))
+    job_doc = db.jobs.find_one({"job_id": job_id}, {"max_video_hours": 1, "_id": 0})
+    max_hours = resolve_max_video_hours(job_doc, os.environ.get("MAX_VIDEO_HOURS"))
     if duration_sec > max_hours * 3600:
         raise IngestError(
             "TOO_LONG",
@@ -92,7 +96,6 @@ def download_video(job_id: str, youtube_url: str, job_dir: Path) -> Path:
 
     title = (info.get("title") or info.get("id") or "Unknown")[:500]
 
-    db = get_db()
     db.jobs.update_one(
         {"job_id": job_id},
         {"$set": {"video_title": title, "duration_sec": duration_sec}},
@@ -211,6 +214,22 @@ def download_video(job_id: str, youtube_url: str, job_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def resolve_max_video_hours(job_doc: dict[str, Any] | None, env_value: str | None) -> int:
+    """
+    This job's length cap in hours. The API stamps `max_video_hours` on every
+    job it creates (5 h for regular users, MAX_VIDEO_HOURS for admins — see
+    backend/app/services/limits.py); jobs created before that field existed
+    fall back to the MAX_VIDEO_HOURS env var, then 15.
+    """
+    value = (job_doc or {}).get("max_video_hours")
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+        return int(value)
+    try:
+        return int(env_value) if env_value else 15
+    except ValueError:
+        return 15
+
 
 def _maybe_add_proxy(ydl_opts: dict[str, Any]) -> None:
     """

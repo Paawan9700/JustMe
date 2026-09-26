@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     hf_token: Optional[str] = Field(default=None, validation_alias="HF_TOKEN")
 
     # ---- App limits ------------------------------------------------------
+    # Longest video an ADMIN may submit. Regular users get
+    # user_max_video_hours instead. The API stamps the right value onto each
+    # job and the worker enforces it at ingest.
     max_video_hours: int = Field(default=15, validation_alias="MAX_VIDEO_HOURS")
 
     # ---- Gemini (stock-recommendations feature) -------------------------
@@ -80,6 +83,34 @@ class Settings(BaseSettings):
     # There is no viable model fallback; transient failures are handled by the
     # backoff retry in services/recommendations.py instead.
     gemini_model: str = Field(default="gemini-2.5-flash", validation_alias="GEMINI_MODEL")
+
+    # ---- Auth (Google sign-in -> our own session JWT) --------------------
+    # Optional so the app (and the hermetic unit tests) still boot without
+    # them, but auth FAILS CLOSED: with no AUTH_JWT_SECRET every protected
+    # route returns 503, and with no GOOGLE_CLIENT_ID nobody can sign in.
+    # There is no "auth disabled" mode.
+    google_client_id: Optional[str] = Field(default=None, validation_alias="GOOGLE_CLIENT_ID")
+    auth_jwt_secret: Optional[str] = Field(default=None, validation_alias="AUTH_JWT_SECRET")
+    # Comma-separated Google emails. Admins are implicitly allowed, can see
+    # every user's jobs, and are the only ones who can open a job they don't
+    # own. Kept as plain strings (not list[str]) so pydantic-settings doesn't
+    # try to JSON-decode them.
+    admin_emails: str = Field(default="", validation_alias="ADMIN_EMAILS")
+    allowed_emails: str = Field(default="", validation_alias="ALLOWED_EMAILS")
+    auth_token_ttl_days: int = Field(default=30, validation_alias="AUTH_TOKEN_TTL_DAYS")
+
+    # ---- Sign-up + per-user limits ---------------------------------------
+    # OPEN_SIGNUP=true: any verified Google account may sign in and
+    # ALLOWED_EMAILS stops mattering. BLOCKED_EMAILS always wins over both
+    # (except for admins), so one abusive account can be shut out without
+    # closing sign-up for everyone.
+    open_signup: bool = Field(default=False, validation_alias="OPEN_SIGNUP")
+    blocked_emails: str = Field(default="", validation_alias="BLOCKED_EMAILS")
+    # Non-admin limits. The day is the IST calendar day (resets at midnight
+    # IST), and failed jobs don't count, so our own outages never burn a
+    # user's quota.
+    user_daily_video_limit: int = Field(default=5, validation_alias="USER_DAILY_VIDEO_LIMIT")
+    user_max_video_hours: int = Field(default=5, validation_alias="USER_MAX_VIDEO_HOURS")
 
 
 # Singleton — import this anywhere you need config.
