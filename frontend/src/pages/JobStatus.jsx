@@ -260,7 +260,11 @@ export default function JobStatus() {
 
   return (
     <main
-      className="mx-auto w-full max-w-5xl flex-1 px-5 py-10 sm:px-8 sm:py-14"
+      className={`mx-auto w-full ${
+        // The speaker grid gets the header's full width so cards have room
+        // for the user's names for their favourite voices.
+        status === "AWAITING_SELECTION" ? "max-w-6xl" : "max-w-5xl"
+      } flex-1 px-5 py-10 sm:px-8 sm:py-14`}
       data-testid={`job-status-page-${status}`}
     >
       <AnimatePresence mode="wait">

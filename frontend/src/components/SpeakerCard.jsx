@@ -80,22 +80,24 @@ export default function SpeakerCard({
             <AudioLines className="h-5 w-5" />
           </span>
           <div className="min-w-0">
+            {/* The user's full name for a favourite must be readable, so it
+                wraps (up to two lines) instead of being cut off. */}
             <p
-              className="truncate text-base font-semibold leading-tight text-white"
+              className="line-clamp-2 break-words text-base font-semibold leading-snug text-white"
               title={title}
               data-testid={`speaker-name-${label}`}
             >
               {title}
             </p>
             <p
-              className="mt-1 flex items-center gap-3 font-mono text-xs text-slate-500"
+              className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-xs text-slate-500"
               data-testid={`speaker-meta-${label}`}
             >
-              <span className="inline-flex items-center gap-1">
+              <span className="inline-flex items-center gap-1 whitespace-nowrap">
                 <Clock className="h-3 w-3" />
                 {timeStr}
               </span>
-              <span className="inline-flex items-center gap-1">
+              <span className="inline-flex items-center gap-1 whitespace-nowrap">
                 <Hash className="h-3 w-3" />
                 {segStr}
               </span>
@@ -178,7 +180,7 @@ export default function SpeakerCard({
         type="button"
         whileHover={!disabled && !isSelecting ? { y: -2 } : {}}
         whileTap={!disabled && !isSelecting ? { scale: 0.98 } : {}}
-        className="btn-primary w-full"
+        className="btn-primary mt-auto w-full"
         onClick={() => onSelect(label)}
         disabled={disabled || isSelecting}
         data-testid={`speaker-select-btn-${label}`}
