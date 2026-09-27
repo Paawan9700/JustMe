@@ -16,9 +16,11 @@ import {
   Check,
   Clock,
   BrainCircuit,
+  Heart,
 } from "lucide-react";
-import { getJob, selectSpeaker, generateRecommendations } from "../lib/api";
+import { getJob, selectSpeaker, generateRecommendations, addFavorite } from "../lib/api";
 import ProgressBar from "../components/ProgressBar";
+import RemoveFavoriteDialog from "../components/RemoveFavoriteDialog";
 import SpeakerCard from "../components/SpeakerCard";
 
 const POLL_MS = 3000;
@@ -404,6 +406,85 @@ function Processing({ job }) {
 /* --------------------------------------------------------------------- */
 function AwaitingSelection({ job, onSelect, selecting, selectError }) {
   const speakers = job.speakers || [];
+
+  // Which cards sit in the "Your favourites" box is decided ONCE, from the
+  // first response: hearting or un-hearting never moves a card mid-session
+  // (moving would also remount it and reset its audio).
+  const [boxLabels] = useState(
+    () => new Set(speakers.filter((sp) => sp.favorite && sp.favorite.in_box).map((sp) => sp.label))
+  );
+  // Heart state per label. Polling has stopped at this status, so this local
+  // copy is the source of truth until the user picks a speaker.
+  const [favs, setFavs] = useState(() =>
+    Object.fromEntries(speakers.map((sp) => [sp.label, sp.favorite || null]))
+  );
+  const [favBusy, setFavBusy] = useState(null);
+  const [favError, setFavError] = useState(null);
+  const [removing, setRemoving] = useState(null); // favorite_id awaiting confirmation
+
+  // Favourites apply only to the job's owner and only when voice prints exist.
+  const showHearts =
+    job.favorites_total != null && speakers.some((sp) => sp.can_favorite || sp.favorite);
+
+  const indexed = speakers.map((sp, i) => ({ sp, i }));
+  const boxed = indexed
+    .filter(({ sp }) => boxLabels.has(sp.label))
+    .sort((a, b) => {
+      const rank = (x) => (x.sp.favorite && x.sp.favorite.strength === "strong" ? 0 : 1);
+      return rank(a) - rank(b) || b.sp.total_speaking_sec - a.sp.total_speaking_sec;
+    });
+  const rest = indexed.filter(({ sp }) => !boxLabels.has(sp.label));
+
+  async function toggleFavorite(sp) {
+    const current = favs[sp.label];
+    if (current) {
+      setRemoving(current.favorite_id);
+      return;
+    }
+    setFavBusy(sp.label);
+    setFavError(null);
+    try {
+      const f = await addFavorite(job.job_id, sp.label);
+      setFavs((prev) => ({
+        ...prev,
+        [sp.label]: { favorite_id: f.favorite_id, name: f.name, in_box: false, strength: null },
+      }));
+    } catch (err) {
+      setFavError(err.message || "Couldn't save this voice");
+    } finally {
+      setFavBusy(null);
+    }
+  }
+
+  function onRemoved(favoriteId) {
+    // Every card linked to that favourite loses its heart (one person can be
+    // split across two cards).
+    setFavs((prev) =>
+      Object.fromEntries(
+        Object.entries(prev).map(([label, f]) => [label, f && f.favorite_id === favoriteId ? null : f])
+      )
+    );
+    setRemoving(null);
+  }
+
+  const renderCard = ({ sp, i }) => (
+    <SpeakerCard
+      key={sp.label}
+      speaker={sp}
+      displayName={displayNameFor(sp.label, i)}
+      onSelect={onSelect}
+      isSelecting={selecting === sp.label}
+      disabled={selecting !== null && selecting !== sp.label}
+      showHeart={showHearts}
+      favorite={favs[sp.label]}
+      onToggleFavorite={toggleFavorite}
+      favoriteBusy={favBusy === sp.label}
+      heartDisabled={selecting !== null || (favBusy !== null && favBusy !== sp.label)}
+    />
+  );
+
+  const gridVariants = { hidden: {}, show: { transition: { staggerChildren: 0.06 } } };
+
   return (
     <div data-testid="state-awaiting-selection">
       <div className="mb-7">
@@ -417,26 +498,63 @@ function AwaitingSelection({ job, onSelect, selecting, selectError }) {
         </h2>
         <p className="mt-2 text-slate-400" data-testid="speakers-sub">
           Tap a sample to hear each voice, then pick yours.
+          {showHearts && boxed.length === 0 && job.favorites_total > 0 && (
+            <> None of your favourite voices were found in this video.</>
+          )}
+          {showHearts && job.favorites_total === 0 && (
+            <> Tap <Heart className="inline h-3.5 w-3.5 -translate-y-px text-rose-300" /> on a voice to find it faster next time.</>
+          )}
         </p>
       </div>
 
+      {favError && (
+        <p
+          className="mb-5 flex items-center gap-2 rounded-xl border border-bear/30 bg-bear/10 px-4 py-3 text-sm text-bear-soft"
+          data-testid="favorite-error"
+        >
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          {favError}
+        </p>
+      )}
+
+      {boxed.length > 0 && (
+        <section
+          className="mb-8 rounded-2xl border border-rose-400/20 bg-rose-400/[0.04] p-4 sm:p-5"
+          data-testid="favorites-box"
+        >
+          <div className="mb-4">
+            <h3 className="flex items-center gap-2 text-base font-semibold text-white">
+              <Heart className="h-4 w-4 fill-current text-rose-300" />
+              Your favourites in this video
+            </h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Listen to these first. If your voice isn&rsquo;t here, it&rsquo;s in the list below.
+            </p>
+          </div>
+          <motion.div
+            initial="hidden"
+            animate="show"
+            variants={gridVariants}
+            className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
+          >
+            {boxed.map(renderCard)}
+          </motion.div>
+        </section>
+      )}
+
+      {boxed.length > 0 && rest.length > 0 && (
+        <h3 className="label-mono mb-4" data-testid="other-speakers-heading">
+          All other speakers
+        </h3>
+      )}
       <motion.div
         initial="hidden"
         animate="show"
-        variants={{ hidden: {}, show: { transition: { staggerChildren: 0.06 } } }}
+        variants={gridVariants}
         className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
         data-testid="speakers-grid"
       >
-        {speakers.map((sp, i) => (
-          <SpeakerCard
-            key={sp.label}
-            speaker={sp}
-            displayName={displayNameFor(sp.label, i)}
-            onSelect={onSelect}
-            isSelecting={selecting === sp.label}
-            disabled={selecting !== null && selecting !== sp.label}
-          />
-        ))}
+        {rest.map(renderCard)}
       </motion.div>
 
       {selectError && (
@@ -447,6 +565,14 @@ function AwaitingSelection({ job, onSelect, selecting, selectError }) {
           <AlertTriangle className="h-4 w-4 shrink-0" />
           {selectError}
         </p>
+      )}
+
+      {removing && (
+        <RemoveFavoriteDialog
+          favoriteId={removing}
+          onRemoved={onRemoved}
+          onCancel={() => setRemoving(null)}
+        />
       )}
     </div>
   );

@@ -6,7 +6,7 @@ import { ShieldCheck } from "lucide-react";
 // the sign-in app can be published to everyone. Keep this in step with what
 // the code actually does — see .claude/CLAUDE.md for the data flow.
 const CONTACT = "paawansingal.dev@gmail.com";
-const UPDATED = "26 September 2026";
+const UPDATED = "27 September 2026";
 
 function Section({ title, children }) {
   return (
@@ -42,13 +42,16 @@ export default function Privacy() {
           </p>
           <p>
             <strong className="text-slate-200">What you give us:</strong> the YouTube links you
-            submit and the speaker you pick.
+            submit, the speaker you pick, and the voices you save as favourites (with any name you
+            give them).
           </p>
           <p>
             <strong className="text-slate-200">What we make from it:</strong> the video&rsquo;s
             title and length, the detected speakers and when each one talks, a transcript, the
             final edited video and its audio, and, if you ask for insights, a CSV of the stock
-            recommendations mentioned.
+            recommendations mentioned. To find your favourite voices in new videos we compute a
+            &ldquo;voice print&rdquo; for each detected speaker: a list of numbers describing how
+            the voice sounds, not a recording of it.
           </p>
           <p>
             <strong className="text-slate-200">In your browser:</strong> a sign-in token kept in
@@ -81,9 +84,11 @@ export default function Privacy() {
         <Section title="How long we keep it">
           <p>
             Temporary processing files, including the full downloaded video and its audio, are
-            deleted once processing finishes, and within about two days at most. Your finished
-            videos, transcripts and CSVs, and your account details, are kept until you ask us to
-            delete them.
+            deleted once processing finishes, and within about two days at most. Voice prints of
+            the speakers in a video are deleted after about a week. Your finished videos,
+            transcripts and CSVs, your account details, and your favourite voices (their voice
+            prints and a short sample clip) are kept until you remove them or ask us to delete
+            them.
           </p>
           <p>
             Download links we generate expire after one hour. Anyone you share a link with during

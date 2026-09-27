@@ -322,11 +322,9 @@ def run_diarization(
         job_id, len(speakers_doc), len(processed), total_speaking,
     )
 
-    # Local audio is no longer needed (R2 still has it for M5 snippet gen)
-    try:
-        local_audio.unlink()
-    except OSError:
-        pass
+    # Keep the local audio.wav: the snippet stage computes voice prints from
+    # it (worker/tasks/voiceprints.py). pipeline.py removes job_dir when the
+    # run ends.
 
     # Full GPU memory purge so the next job starts with a clean slate.
     # Without this, CUDA memory from this job's models stays allocated

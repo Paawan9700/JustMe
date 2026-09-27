@@ -43,12 +43,24 @@ class JobError(BaseModel):
     message: str
 
 
+class SpeakerFavorite(BaseModel):
+    """This speaker's link to one of the viewer's favourite voices."""
+    favorite_id: str
+    name: Optional[str] = None      # the user's own name for it, never generated
+    in_box: bool = False            # matched by voice -> "Your favourites" box
+    strength: Optional[str] = None  # "strong" | "likely" when in_box
+
+
 class SpeakerInfoResponse(BaseModel):
     label: str
     total_speaking_sec: float
     segment_count: int
     # Presigned URL injected at read time; null if snippet not yet uploaded.
     snippet_url: Optional[str] = None
+    # Favourite voices — only filled for the job's owner while the job is
+    # AWAITING_SELECTION; null/false otherwise (old jobs, admin views).
+    favorite: Optional[SpeakerFavorite] = None
+    can_favorite: bool = False
 
 
 class JobResponse(BaseModel):
@@ -59,6 +71,9 @@ class JobResponse(BaseModel):
     video_title: Optional[str] = None
     duration_sec: int = 0
     speakers: list[SpeakerInfoResponse] = []
+    # How many favourite voices the viewer has (null when favourites don't
+    # apply to this view) — drives the "none found" vs "tap ❤️" hint.
+    favorites_total: Optional[int] = None
     selected_speaker: Optional[str] = None
     download_url: Optional[str] = None  # presigned, only when status == DONE
     transcription_url: Optional[str] = None  # presigned .txt, only when status == DONE

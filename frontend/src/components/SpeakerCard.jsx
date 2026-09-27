@@ -1,16 +1,19 @@
 import React, { useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Check, Loader2, AudioLines, Clock, Hash, Play, Pause } from "lucide-react";
+import { Check, Loader2, AudioLines, Clock, Hash, Play, Pause, Heart } from "lucide-react";
 
 /**
  * One speaker option in the AWAITING_SELECTION state.
  *
  * Props:
- *   - speaker: { label, total_speaking_sec, segment_count, snippet_url }
+ *   - speaker: { label, total_speaking_sec, segment_count, snippet_url, can_favorite }
  *   - displayName: "Speaker 1"
  *   - onSelect(label)
  *   - isSelecting: boolean
  *   - disabled: boolean (other card is selecting)
+ *   - showHeart: render the favourite toggle at all
+ *   - favorite: { favorite_id, name, in_box, strength } | null — current heart state
+ *   - onToggleFavorite(speaker), favoriteBusy, heartDisabled
  */
 export default function SpeakerCard({
   speaker,
@@ -18,8 +21,15 @@ export default function SpeakerCard({
   onSelect,
   isSelecting,
   disabled,
+  showHeart = false,
+  favorite = null,
+  onToggleFavorite,
+  favoriteBusy = false,
+  heartDisabled = false,
 }) {
-  const { label, total_speaking_sec, segment_count, snippet_url } = speaker;
+  const { label, total_speaking_sec, segment_count, snippet_url, can_favorite } = speaker;
+  // The user's own name for a favourite voice wins; nothing is ever named for them.
+  const title = (favorite && favorite.name) || displayName;
   const { timeStr, segStr } = formatSpeakingMeta(total_speaking_sec, segment_count);
 
   // Freeze the FIRST non-null snippet URL we ever receive and keep using it.
@@ -64,17 +74,18 @@ export default function SpeakerCard({
       } ${disabled && !isSelecting ? "opacity-50" : ""}`}
       data-testid={`speaker-card-${label}`}
     >
-      <div className="flex items-start justify-between">
-        <div className="flex items-center gap-3">
-          <span className="grid h-10 w-10 place-items-center rounded-xl border border-white/10 bg-white/[0.03] text-accent-soft">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-white/10 bg-white/[0.03] text-accent-soft">
             <AudioLines className="h-5 w-5" />
           </span>
-          <div>
+          <div className="min-w-0">
             <p
-              className="text-base font-semibold leading-tight text-white"
+              className="truncate text-base font-semibold leading-tight text-white"
+              title={title}
               data-testid={`speaker-name-${label}`}
             >
-              {displayName}
+              {title}
             </p>
             <p
               className="mt-1 flex items-center gap-3 font-mono text-xs text-slate-500"
@@ -89,8 +100,24 @@ export default function SpeakerCard({
                 {segStr}
               </span>
             </p>
+            {favorite && favorite.in_box && (
+              <p className="mt-1.5 inline-flex items-center gap-1.5 rounded-full border border-rose-400/25 bg-rose-400/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-rose-200">
+                <Heart className="h-3 w-3 fill-current" />
+                {favorite.strength === "likely" ? "Possible match" : "Favourite"}
+              </p>
+            )}
           </div>
         </div>
+        {showHeart && (
+          <HeartButton
+            filled={!!favorite}
+            busy={favoriteBusy}
+            disabled={heartDisabled || (!favorite && !can_favorite)}
+            cannotSave={!favorite && !can_favorite}
+            onClick={() => onToggleFavorite && onToggleFavorite(speaker)}
+            label={label}
+          />
+        )}
       </div>
 
       <div className="rounded-xl border border-white/[0.06] bg-ink-950/60 p-3">
@@ -169,6 +196,36 @@ export default function SpeakerCard({
         )}
       </motion.button>
     </motion.div>
+  );
+}
+
+function HeartButton({ filled, busy, disabled, cannotSave, onClick, label }) {
+  const hint = cannotSave
+    ? "Not enough clear speech to remember this voice"
+    : filled
+      ? "Remove from favourites"
+      : "Save to favourites";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled || busy}
+      aria-pressed={filled}
+      aria-label={hint}
+      title={hint}
+      className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl border transition-all duration-200 disabled:cursor-not-allowed ${
+        filled
+          ? "border-rose-400/40 bg-rose-400/15 text-rose-300 hover:bg-rose-400/25"
+          : "border-white/10 bg-white/[0.03] text-slate-400 hover:border-rose-400/40 hover:text-rose-300"
+      } ${disabled && !busy ? "opacity-40" : ""}`}
+      data-testid={`speaker-fav-btn-${label}`}
+    >
+      {busy ? (
+        <Loader2 className="h-4 w-4 animate-spin" />
+      ) : (
+        <Heart className={`h-4 w-4 ${filled ? "fill-current" : ""}`} />
+      )}
+    </button>
   );
 }
 

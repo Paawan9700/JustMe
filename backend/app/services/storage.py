@@ -111,6 +111,19 @@ class R2Storage:
                 return False
             raise
 
+    def copy_object(self, src_key: str, dst_key: str) -> None:
+        """Server-side copy inside the bucket (no download). Raises ClientError
+        (see `is_not_found`) when `src_key` doesn't exist."""
+        self._client.copy_object(
+            Bucket=self.bucket,
+            Key=dst_key,
+            CopySource={"Bucket": self.bucket, "Key": src_key},
+        )
+
+    def delete_object(self, r2_key: str) -> None:
+        """Delete one object. Deleting a missing key is not an error in S3/R2."""
+        self._client.delete_object(Bucket=self.bucket, Key=r2_key)
+
     # ---- health check ----------------------------------------------------
 
     def ping(self) -> bool:
@@ -123,6 +136,14 @@ class R2Storage:
             return True
         except Exception:
             return False
+
+
+def is_not_found(exc: Exception) -> bool:
+    """True for the ClientError S3/R2 raises when an object doesn't exist."""
+    if not isinstance(exc, ClientError):
+        return False
+    code = exc.response.get("Error", {}).get("Code", "")
+    return code in ("404", "NoSuchKey", "NotFound")
 
 
 @lru_cache(maxsize=1)

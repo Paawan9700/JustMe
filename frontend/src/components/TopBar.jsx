@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
-import { ArrowRight, AudioLines, Film, LogOut } from "lucide-react";
+import { ArrowRight, AudioLines, Film, Heart, LogOut } from "lucide-react";
 import { useAuth } from "../lib/auth";
 
 // The three plain-language steps of what Alphavox does, in journey order.
@@ -142,6 +142,32 @@ function MyVideosLink() {
   );
 }
 
+// Secondary to My Videos: icon-only on phones, labelled from sm up.
+function FavoritesLink() {
+  return (
+    <NavLink
+      to="/favorites"
+      aria-label="Favourite voices"
+      title="Favourite voices"
+      className={({ isActive }) =>
+        `inline-flex h-9 items-center gap-2 rounded-xl border px-2.5 text-[13px] font-semibold no-underline transition-all duration-200 sm:h-10 sm:px-3.5 sm:text-sm ${FOCUS_RING} ${
+          isActive
+            ? "border-rose-400/40 bg-rose-400/15 text-white"
+            : "border-white/10 bg-white/[0.03] text-slate-300 hover:border-rose-400/40 hover:text-white"
+        }`
+      }
+      data-testid="nav-favorites-link"
+    >
+      {({ isActive }) => (
+        <>
+          <Heart className={`h-4 w-4 text-rose-300 ${isActive ? "fill-current" : ""}`} />
+          <span className="hidden sm:inline">Favourites</span>
+        </>
+      )}
+    </NavLink>
+  );
+}
+
 // Google profile photo in a brand-gradient ring, falling back to an initial
 // if it fails to load.
 function Avatar({ user }) {
@@ -252,6 +278,7 @@ export default function TopBar() {
 
           {authed && (
             <nav className="flex shrink-0 items-center gap-2 sm:gap-3" aria-label="Primary">
+              <FavoritesLink />
               <MyVideosLink />
               <Divider className="mx-1 hidden sm:block" />
               <Account />

@@ -96,3 +96,43 @@ export async function getMe() {
   const r = await fetch(`${BASE}/api/auth/me`, { headers: withAuth() });
   return handle(r);
 }
+
+// ---- Favourite voices --------------------------------------------------------
+
+export async function listFavorites() {
+  const r = await fetch(`${BASE}/api/favorites`, { headers: withAuth() });
+  return handle(r);
+}
+
+// One favourite with a freshly signed sample_url (links expire after 1 h).
+export async function getFavorite(favoriteId) {
+  const r = await fetch(`${BASE}/api/favorites/${favoriteId}`, { headers: withAuth() });
+  return handle(r);
+}
+
+export async function addFavorite(jobId, speakerLabel) {
+  const r = await fetch(`${BASE}/api/favorites`, {
+    method: "POST",
+    headers: withAuth(JSON_HEADERS),
+    body: JSON.stringify({ job_id: jobId, speaker_label: speakerLabel }),
+  });
+  return handle(r);
+}
+
+// An empty name clears it.
+export async function renameFavorite(favoriteId, name) {
+  const r = await fetch(`${BASE}/api/favorites/${favoriteId}`, {
+    method: "PATCH",
+    headers: withAuth(JSON_HEADERS),
+    body: JSON.stringify({ name }),
+  });
+  return handle(r);
+}
+
+export async function deleteFavorite(favoriteId) {
+  const r = await fetch(`${BASE}/api/favorites/${favoriteId}`, {
+    method: "DELETE",
+    headers: withAuth(),
+  });
+  return handle(r);
+}

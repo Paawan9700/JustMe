@@ -100,6 +100,12 @@ def is_legal_transition(current: str, new: str) -> bool:
 #   jobs/{job_id}/diarization.json    (raw pyannote turns — debug/attribution)
 #   jobs/{job_id}/transcription.txt   (plain-text transcript of the final video)
 #   jobs/{job_id}/recommendations.csv (LLM-extracted stock recommendations)
+#
+#   favorites/{user_id}/{favorite_id}.mp3  (a favourite voice's saved sample)
+#
+# favorites/ is a THIRD permanent prefix (no lifecycle rule): a copy of the
+# speaker snippet taken when the user hearts a voice, because the original
+# under ephemeral/ is deleted after render. Removed when the favourite is.
 # ---------------------------------------------------------------------------
 
 def r2_key_source_video(job_id: str) -> str:
@@ -133,6 +139,16 @@ def r2_key_snippet(job_id: str, speaker_label: str) -> str:
     deletes the whole snippets/ prefix once the user's choice has been applied.
     """
     return f"ephemeral/{job_id}/snippets/{speaker_label}.mp3"
+
+
+def r2_key_favorite_sample(user_id: str, favorite_id: str) -> str:
+    """
+    A favourite voice's sample clip. PERMANENT (kept until the favourite is
+    removed): copied from the job's ephemeral snippet at the moment the user
+    hearts the voice, so the Favourite voices page can still play it after
+    the job's ephemeral/ tree is gone.
+    """
+    return f"favorites/{user_id}/{favorite_id}.mp3"
 
 
 def r2_prefix_ephemeral(job_id: str) -> str:

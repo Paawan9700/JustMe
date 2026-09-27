@@ -2,6 +2,7 @@ import React from "react";
 import { Routes, Route, Link } from "react-router-dom";
 import { AuthProvider, RequireAuth } from "./lib/auth";
 import TopBar from "./components/TopBar";
+import Favorites from "./pages/Favorites";
 import Home from "./pages/Home";
 import JobStatus from "./pages/JobStatus";
 import Login from "./pages/Login";
@@ -20,6 +21,7 @@ export default function App() {
           <Route path="/" element={<RequireAuth><Home /></RequireAuth>} />
           <Route path="/jobs" element={<RequireAuth><MyJobs /></RequireAuth>} />
           <Route path="/jobs/:jobId" element={<RequireAuth><JobStatus /></RequireAuth>} />
+          <Route path="/favorites" element={<RequireAuth><Favorites /></RequireAuth>} />
           <Route
             path="*"
             element={

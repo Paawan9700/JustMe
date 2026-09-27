@@ -23,6 +23,7 @@ from typing import Any
 from pymongo import ReturnDocument
 
 from app.db.mongo import get_db
+from app.services import favorite_service
 from app.services.storage import get_storage
 from shared.constants import (
     ALLOWED_TRANSITIONS,
@@ -215,11 +216,17 @@ async def _fail_if_stalled(doc: dict[str, Any]) -> dict[str, Any]:
     return repaired or doc
 
 
-async def get_job_hydrated(job_id: str) -> dict[str, Any] | None:
+async def get_job_hydrated(
+    job_id: str, viewer: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """
     Same as get_job_raw, plus:
       * inject `snippet_url` on each speaker (presigned, 1h) when status
         >= AWAITING_SELECTION and the snippet_key exists.
+      * inject each speaker's `favorite` / `can_favorite` and the top-level
+        `favorites_total` when `viewer` owns a job awaiting selection
+        (services/favorite_service.py). Best-effort: a failure here only
+        hides the favourites box.
       * inject top-level `download_url` (presigned, 1h) when status == DONE
         and final_video_key exists.
       * inject top-level `transcription_url` (presigned, 1h) when status ==
@@ -244,6 +251,15 @@ async def get_job_hydrated(job_id: str) -> dict[str, Any] | None:
         JobStatus.FAILED.value,
     }
 
+    annotations: dict[str, dict[str, Any]] = {}
+    favorites_total = None
+    if viewer is not None:
+        try:
+            annotations, favorites_total = await favorite_service.annotate(doc, viewer)
+        except Exception:  # noqa: BLE001
+            logger.warning("favourites annotation failed for %s", job_id, exc_info=True)
+    doc["favorites_total"] = favorites_total
+
     speakers_out = []
     for sp in doc.get("speakers", []) or []:
         snippet_url = None
@@ -262,6 +278,7 @@ async def get_job_hydrated(job_id: str) -> dict[str, Any] | None:
                 "total_speaking_sec": float(sp.get("total_speaking_sec", 0.0)),
                 "segment_count": int(sp.get("segment_count", 0)),
                 "snippet_url": snippet_url,
+                **annotations.get(sp.get("label"), {}),
             }
         )
     doc["speakers"] = speakers_out

@@ -34,7 +34,7 @@ from app.models.job import (
     SelectSpeakerRequest,
     SelectSpeakerResponse,
 )
-from app.services import auth, job_service, limits, recommendations
+from app.services import auth, favorite_service, job_service, limits, recommendations
 from app.services.queue import enqueue_process_video, enqueue_render_video
 
 logger = logging.getLogger(__name__)
@@ -211,7 +211,7 @@ async def list_jobs(
 @router.get("/{job_id}", response_model=JobResponse)
 async def get_job(job_id: str, user: dict[str, Any] = Depends(get_current_user)) -> JobResponse:
     await _require_job_access(job_id, user)
-    doc = await job_service.get_job_hydrated(job_id)
+    doc = await job_service.get_job_hydrated(job_id, viewer=user)
     if doc is None:
         raise HTTPException(status_code=404, detail="Job not found")
     # JobResponse will silently drop fields it doesn't know about (e.g.
@@ -227,6 +227,7 @@ async def get_job(job_id: str, user: dict[str, Any] = Depends(get_current_user))
 async def select_speaker(
     job_id: str,
     payload: SelectSpeakerRequest,
+    background_tasks: BackgroundTasks,
     user: dict[str, Any] = Depends(get_current_user),
 ) -> SelectSpeakerResponse:
     await _require_job_access(job_id, user)
@@ -260,6 +261,12 @@ async def select_speaker(
             status_code=502,
             detail="Background queue unavailable; job marked FAILED",
         ) from exc
+
+    # Favourite-voice bookkeeping (learning + selection_context) runs after
+    # the response, so it can never slow down or fail the selection.
+    background_tasks.add_task(
+        favorite_service.record_selection_safe, job_id, payload.speaker_label, user,
+    )
 
     job = result["job"]
     return SelectSpeakerResponse(job_id=job["job_id"], status=job["status"])

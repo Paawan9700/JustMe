@@ -23,8 +23,10 @@ Pipeline:
      the whole segment), ffmpeg -> mp3 @ 128k,
      upload to R2, set `speakers.$.snippet_key`. Per-speaker errors
      are logged and skipped (other speakers' clips still ship).
-  6. Delete the local source video (M6 will re-download for render).
-  7. Transition to AWAITING_SELECTION, progress 100%.
+  6. Compute a voice print per speaker (worker/tasks/voiceprints.py) for
+     the favourites box. Best-effort.
+  7. Delete the local source video (M6 will re-download for render).
+  8. Transition to AWAITING_SELECTION, progress 100%.
 
 Public entry point: `generate_snippets(job_id, job_dir)`.
 """
@@ -35,8 +37,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from worker.db import get_db
 from worker.state import progress, transition
+from worker.tasks import voiceprints
 from worker.utils.ffmpeg import FFmpegError, run_ffmpeg
 from worker.utils.storage import download_file, upload_file
 from shared.constants import JobStatus, r2_key_snippet
@@ -162,7 +167,22 @@ def _do_snippets(
             {"$set": {"speakers.$.snippet_key": r2_key}},
         )
 
-    # 3. Cleanup local source (M6 re-downloads from R2 for the render).
+    # 3. Voice prints for the "Your favourites" box on the selection page.
+    # Best-effort: without them the page just shows no favourites box, so a
+    # failure here must never fail the job. Runs before the move to
+    # AWAITING_SELECTION because the page stops polling once it gets there.
+    progress(job_id, percent=96.0, message="Preparing voice matching...")
+    try:
+        voiceprints.compute_for_job(job_id, job_dir, local_source)
+    except SoftTimeLimitExceeded:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "snippets[%s] voice prints failed (%s); continuing without the "
+            "favourites box", job_id, exc, exc_info=True,
+        )
+
+    # 4. Cleanup local source (M6 re-downloads from R2 for the render).
     try:
         local_source.unlink()
     except OSError:
