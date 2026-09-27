@@ -142,18 +142,19 @@ function MyVideosLink() {
   );
 }
 
-// Secondary to My Videos: icon-only on phones, labelled from sm up.
+// Secondary to My Videos, so it's an icon button with a hover label — the
+// same pattern as Sign out. A labelled button doesn't fit next to the full
+// pitch path, My Videos and the profile inside the header's max width.
 function FavoritesLink() {
   return (
     <NavLink
       to="/favorites"
       aria-label="Favourite voices"
-      title="Favourite voices"
       className={({ isActive }) =>
-        `inline-flex h-9 items-center gap-2 rounded-xl border px-2.5 text-[13px] font-semibold no-underline transition-all duration-200 sm:h-10 sm:px-3.5 sm:text-sm ${FOCUS_RING} ${
+        `group relative grid h-9 w-9 shrink-0 place-items-center rounded-xl border transition-all duration-200 sm:h-10 sm:w-10 ${FOCUS_RING} ${
           isActive
-            ? "border-rose-400/40 bg-rose-400/15 text-white"
-            : "border-white/10 bg-white/[0.03] text-slate-300 hover:border-rose-400/40 hover:text-white"
+            ? "border-rose-400/40 bg-rose-400/15"
+            : "border-white/10 bg-white/[0.03] hover:border-rose-400/40 hover:bg-rose-400/10"
         }`
       }
       data-testid="nav-favorites-link"
@@ -161,7 +162,12 @@ function FavoritesLink() {
       {({ isActive }) => (
         <>
           <Heart className={`h-4 w-4 text-rose-300 ${isActive ? "fill-current" : ""}`} />
-          <span className="hidden sm:inline">Favourites</span>
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute left-1/2 top-[calc(100%+8px)] -translate-x-1/2 whitespace-nowrap rounded-lg border border-white/10 bg-ink-800 px-2.5 py-1 font-mono text-[11px] text-slate-200 opacity-0 shadow-glass transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100"
+          >
+            Favourite voices
+          </span>
         </>
       )}
     </NavLink>
