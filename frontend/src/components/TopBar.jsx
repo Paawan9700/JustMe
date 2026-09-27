@@ -1,117 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
-import { AnimatePresence, MotionConfig, motion } from "framer-motion";
+import { MotionConfig } from "framer-motion";
 import { ArrowRight, AudioLines, Film, Heart, LogOut } from "lucide-react";
 import { useAuth } from "../lib/auth";
-
-// The three plain-language steps of what Alphavox does, in journey order.
-// Shown as a "signal path" next to the brand so a first-time visitor gets the
-// pitch at a glance: each step lights up in turn, then the loop restarts.
-const PITCH_STEPS = ["Paste a link", "Pick your voice", "Get just you"];
-const STEP_MS = 2400;
-const EASE = [0.22, 1, 0.36, 1];
 
 const FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-950";
 
 function Divider({ className = "" }) {
   return <span aria-hidden="true" className={`h-6 w-px shrink-0 bg-white/10 ${className}`} />;
-}
-
-// Wide screens: all three steps on one line, joined by connectors that fill
-// as the signal travels from one step to the next.
-function PitchPath({ active }) {
-  return (
-    <ol className="hidden items-center xl:flex" aria-label="How Alphavox works">
-      {PITCH_STEPS.map((label, idx) => {
-        const isActive = idx === active;
-        const isDone = idx < active;
-        return (
-          <li key={label} className="flex items-center">
-            {idx > 0 && (
-              <span aria-hidden="true" className="relative mx-3 h-px w-7 overflow-hidden rounded-full bg-white/10">
-                <motion.span
-                  className="absolute inset-0 origin-left bg-gradient-to-r from-accent to-accent-blue"
-                  initial={false}
-                  animate={{ scaleX: idx <= active ? 1 : 0 }}
-                  transition={{ duration: idx <= active ? 0.55 : 0.3, ease: EASE }}
-                />
-              </span>
-            )}
-            <span className="flex items-center gap-2">
-              <span
-                aria-hidden="true"
-                className={`relative h-1.5 w-1.5 rounded-full transition-[background-color,box-shadow] duration-300 ${
-                  isActive
-                    ? "bg-accent shadow-[0_0_10px_2px_rgba(124,92,255,0.6)] delay-[350ms]"
-                    : isDone
-                      ? "bg-accent/60"
-                      : "bg-white/20"
-                }`}
-              >
-                {isActive && (
-                  <span className="absolute inset-0 rounded-full bg-accent motion-safe:animate-ping" />
-                )}
-              </span>
-              <span
-                className={`whitespace-nowrap font-mono text-[11px] font-medium transition-colors duration-300 ${
-                  isActive ? "text-white delay-[350ms]" : isDone ? "text-slate-400" : "text-slate-500"
-                }`}
-              >
-                {label}
-              </span>
-            </span>
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
-
-// Medium screens: progress ticks plus the current step's name.
-function PitchTicker({ active }) {
-  return (
-    <div className="hidden items-center gap-2.5 md:flex xl:hidden" aria-hidden="true">
-      <span className="flex items-center gap-1">
-        {PITCH_STEPS.map((label, idx) => (
-          <span
-            key={label}
-            className={`h-1 rounded-full transition-all duration-500 ${
-              idx === active ? "w-4 bg-accent" : idx < active ? "w-1.5 bg-accent/60" : "w-1.5 bg-white/15"
-            }`}
-          />
-        ))}
-      </span>
-      <span className="relative inline-grid min-w-[104px] overflow-hidden">
-        <AnimatePresence mode="wait" initial={false}>
-          <motion.span
-            key={active}
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.32, ease: EASE }}
-            className="col-start-1 row-start-1 whitespace-nowrap font-mono text-[11px] font-medium text-slate-300"
-          >
-            {PITCH_STEPS[active]}
-          </motion.span>
-        </AnimatePresence>
-      </span>
-    </div>
-  );
-}
-
-function PitchLoop() {
-  const [active, setActive] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setActive((prev) => (prev + 1) % PITCH_STEPS.length), STEP_MS);
-    return () => clearInterval(id);
-  }, []);
-  return (
-    <>
-      <PitchPath active={active} />
-      <PitchTicker active={active} />
-    </>
-  );
 }
 
 function MyVideosLink() {
@@ -143,8 +40,7 @@ function MyVideosLink() {
 }
 
 // Secondary to My Videos, so it's an icon button with a hover label — the
-// same pattern as Sign out. A labelled button doesn't fit next to the full
-// pitch path, My Videos and the profile inside the header's max width.
+// same pattern as Sign out.
 function FavoritesLink() {
   return (
     <NavLink
@@ -278,8 +174,6 @@ export default function TopBar() {
                 Alpha<span className="text-accent-soft">vox</span>
               </span>
             </Link>
-            <Divider className="hidden md:block" />
-            <PitchLoop />
           </div>
 
           {authed && (

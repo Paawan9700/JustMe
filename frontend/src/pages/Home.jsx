@@ -11,6 +11,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { createJob, getUsage } from "../lib/api";
+import HowItWorks from "../components/HowItWorks";
 
 const STEPS = [
   { icon: Link2, title: "Paste a link", body: "Drop any long YouTube video." },
@@ -68,100 +69,115 @@ export default function Home() {
       className="mx-auto flex w-full max-w-6xl flex-1 flex-col px-5 py-16 sm:px-8 sm:py-24"
       data-testid="home-page"
     >
-      <motion.div
-        initial={{ opacity: 0, y: 14 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-        className="max-w-3xl"
-      >
-        <span className="mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3.5 py-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-slate-400">
-          <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-          Voice extraction · AI Intelligence
-        </span>
-
-        <h1
-          className="text-balance text-4xl font-extrabold leading-[1.04] tracking-tight text-white sm:text-6xl"
-          data-testid="home-title"
-        >
-          Just the parts where{" "}
-          <span className="text-grad-animate">you spoke.</span>
-        </h1>
-
-        <p
-          className="mt-5 max-w-xl text-lg leading-relaxed text-slate-400"
-          data-testid="home-subtitle"
-        >
-          Extract your speaking moments from any long video. Paste a YouTube
-          link — we&rsquo;ll detect every speaker, you pick yourself, and we
-          stitch your bits into one clean cut.
-        </p>
-      </motion.div>
-
-      <motion.form
-        initial={{ opacity: 0, y: 14 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}
-        className="mt-10 max-w-2xl"
-        onSubmit={onSubmit}
-        data-testid="home-form"
-      >
-        <div className="glass flex flex-col gap-3 p-2.5 sm:flex-row sm:items-center sm:p-2.5">
-          <div className="flex flex-1 items-center gap-2.5 rounded-xl px-3">
-            <Link2 className="h-4 w-4 shrink-0 text-slate-500" />
-            <input
-              type="url"
-              className="w-full bg-transparent py-3.5 font-mono text-sm text-slate-100 outline-none placeholder:text-slate-600"
-              placeholder="https://www.youtube.com/watch?v=..."
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              disabled={submitting}
-              aria-label="YouTube URL"
-              data-testid="youtube-url-input"
-              autoFocus
-            />
-          </div>
-          <motion.button
-            type="submit"
-            whileHover={{ y: -2 }}
-            whileTap={{ scale: 0.98 }}
-            className="btn-primary px-6 py-3.5"
-            disabled={submitting || !url.trim() || outOfVideos}
-            data-testid="get-started-btn"
+      {/* Hero + form on the left; on wide screens the animated "how it works"
+          steps fill the space on the right. */}
+      <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_18rem] lg:items-center lg:gap-12 xl:grid-cols-[minmax(0,1fr)_20rem]">
+        <div className="min-w-0">
+          <motion.div
+            initial={{ opacity: 0, y: 14 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+            className="max-w-3xl"
           >
-            {submitting ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Starting…
-              </>
-            ) : (
-              <>
-                Get Started
-                <ArrowRight className="h-4 w-4" />
-              </>
+            <span className="mb-6 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3.5 py-1.5 font-mono text-[11px] uppercase tracking-[0.14em] text-slate-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+              Voice extraction · AI Intelligence
+            </span>
+
+            <h1
+              className="text-balance text-4xl font-extrabold leading-[1.04] tracking-tight text-white sm:text-6xl"
+              data-testid="home-title"
+            >
+              Just the parts where{" "}
+              <span className="text-grad-animate">you spoke.</span>
+            </h1>
+
+            <p
+              className="mt-5 max-w-xl text-lg leading-relaxed text-slate-400"
+              data-testid="home-subtitle"
+            >
+              Extract your speaking moments from any long video. Paste a YouTube
+              link — we&rsquo;ll detect every speaker, you pick yourself, and we
+              stitch your bits into one clean cut.
+            </p>
+          </motion.div>
+
+          <motion.form
+            initial={{ opacity: 0, y: 14 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.08, ease: [0.22, 1, 0.36, 1] }}
+            className="mt-10 max-w-2xl"
+            onSubmit={onSubmit}
+            data-testid="home-form"
+          >
+            <div className="glass flex flex-col gap-3 p-2.5 sm:flex-row sm:items-center sm:p-2.5">
+              <div className="flex flex-1 items-center gap-2.5 rounded-xl px-3">
+                <Link2 className="h-4 w-4 shrink-0 text-slate-500" />
+                <input
+                  type="url"
+                  className="w-full bg-transparent py-3.5 font-mono text-sm text-slate-100 outline-none placeholder:text-slate-600"
+                  placeholder="https://www.youtube.com/watch?v=..."
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  disabled={submitting}
+                  aria-label="YouTube URL"
+                  data-testid="youtube-url-input"
+                  autoFocus
+                />
+              </div>
+              <motion.button
+                type="submit"
+                whileHover={{ y: -2 }}
+                whileTap={{ scale: 0.98 }}
+                className="btn-primary px-6 py-3.5"
+                disabled={submitting || !url.trim() || outOfVideos}
+                data-testid="get-started-btn"
+              >
+                {submitting ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Starting…
+                  </>
+                ) : (
+                  <>
+                    Get Started
+                    <ArrowRight className="h-4 w-4" />
+                  </>
+                )}
+              </motion.button>
+            </div>
+
+            {error && (
+              <motion.p
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mt-3 flex items-center gap-2 rounded-xl border border-bear/30 bg-bear/10 px-4 py-3 text-sm text-bear-soft"
+                data-testid="home-error"
+              >
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                {error}
+              </motion.p>
             )}
-          </motion.button>
+
+            <p
+              className="mt-4 font-mono text-xs text-slate-600"
+              data-testid="home-helper"
+            >
+              {usageLine(usage) || "Handles long videos, including past livestreams."}{" "}
+              Currently-live broadcasts aren&rsquo;t supported.
+            </p>
+          </motion.form>
         </div>
 
-        {error && (
-          <motion.p
-            initial={{ opacity: 0, y: -4 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mt-3 flex items-center gap-2 rounded-xl border border-bear/30 bg-bear/10 px-4 py-3 text-sm text-bear-soft"
-            data-testid="home-error"
-          >
-            <AlertTriangle className="h-4 w-4 shrink-0" />
-            {error}
-          </motion.p>
-        )}
-
-        <p
-          className="mt-4 font-mono text-xs text-slate-600"
-          data-testid="home-helper"
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.16, ease: [0.22, 1, 0.36, 1] }}
+          className="hidden lg:block"
         >
-          {usageLine(usage) || "Handles long videos, including past livestreams."}{" "}
-          Currently-live broadcasts aren&rsquo;t supported.
-        </p>
-      </motion.form>
+          <HowItWorks />
+        </motion.div>
+      </div>
 
       <motion.div
         initial="hidden"
